@@ -10,6 +10,18 @@ import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.launch
 
+// 消息类型枚举
+enum class MessageType {
+    USER,    // 用户输入
+    SYSTEM,  // 系统输出
+}
+
+// 消息数据类
+data class ChatMessage(
+    val content: String,
+    val type: MessageType
+)
+
 class MainViewModel(private val llamaAndroid: LLamaAndroid = LLamaAndroid.instance()): ViewModel() {
     companion object {
         @JvmStatic
@@ -18,7 +30,7 @@ class MainViewModel(private val llamaAndroid: LLamaAndroid = LLamaAndroid.instan
 
     private val tag: String? = this::class.simpleName
 
-    var messages by mutableStateOf(listOf("Initializing..."))
+    var messages by mutableStateOf(listOf(ChatMessage("Initializing...", MessageType.SYSTEM)))
         private set
 
     var message by mutableStateOf("")
@@ -31,7 +43,7 @@ class MainViewModel(private val llamaAndroid: LLamaAndroid = LLamaAndroid.instan
             try {
                 llamaAndroid.unload()
             } catch (exc: IllegalStateException) {
-                messages += exc.message!!
+                messages += ChatMessage(exc.message!!, MessageType.SYSTEM)
             }
         }
     }
@@ -40,17 +52,22 @@ class MainViewModel(private val llamaAndroid: LLamaAndroid = LLamaAndroid.instan
         val text = message
         message = ""
 
-        // Add to messages console.
-        messages += text
-        messages += ""
+        // 添加用户消息
+        messages += ChatMessage(text, MessageType.USER)
+        // 添加空的系统消息，用于接收输出
+        messages += ChatMessage("", MessageType.SYSTEM)
 
         viewModelScope.launch {
             llamaAndroid.send(text)
                 .catch {
                     Log.e(tag, "send() failed", it)
-                    messages += it.message!!
+                    messages += ChatMessage(it.message!!, MessageType.SYSTEM)
                 }
-                .collect { messages = messages.dropLast(1) + (messages.last() + it) }
+                .collect { 
+                    // 更新最后一条系统消息
+                    val lastMessage = messages.last()
+                    messages = messages.dropLast(1) + ChatMessage(lastMessage.content + it, MessageType.SYSTEM)
+                }
         }
     }
 
@@ -61,20 +78,20 @@ class MainViewModel(private val llamaAndroid: LLamaAndroid = LLamaAndroid.instan
                 val warmupResult = llamaAndroid.bench(pp, tg, pl, nr)
                 val end = System.nanoTime()
 
-                messages += warmupResult
+                messages += ChatMessage(warmupResult, MessageType.SYSTEM)
 
                 val warmup = (end - start).toDouble() / NanosPerSecond
-                messages += "Warm up time: $warmup seconds, please wait..."
+                messages += ChatMessage("Warm up time: $warmup seconds, please wait...", MessageType.SYSTEM)
 
                 if (warmup > 5.0) {
-                    messages += "Warm up took too long, aborting benchmark"
+                    messages += ChatMessage("Warm up took too long, aborting benchmark", MessageType.SYSTEM)
                     return@launch
                 }
 
-                messages += llamaAndroid.bench(512, 128, 1, 3)
+                messages += ChatMessage(llamaAndroid.bench(512, 128, 1, 3), MessageType.SYSTEM)
             } catch (exc: IllegalStateException) {
                 Log.e(tag, "bench() failed", exc)
-                messages += exc.message!!
+                messages += ChatMessage(exc.message!!, MessageType.SYSTEM)
             }
         }
     }
@@ -82,11 +99,18 @@ class MainViewModel(private val llamaAndroid: LLamaAndroid = LLamaAndroid.instan
     fun load(pathToModel: String) {
         viewModelScope.launch {
             try {
+                // 先卸载当前模型
+                try {
+                    llamaAndroid.unload()
+                } catch (e: IllegalStateException) {
+                    // 忽略卸载错误
+                }
+                // 加载新模型
                 llamaAndroid.load(pathToModel)
-                messages += "Loaded $pathToModel"
+                messages += ChatMessage("已切换到模型：$pathToModel", MessageType.SYSTEM)
             } catch (exc: IllegalStateException) {
                 Log.e(tag, "load() failed", exc)
-                messages += exc.message!!
+                messages += ChatMessage(exc.message!!, MessageType.SYSTEM)
             }
         }
     }
@@ -96,10 +120,10 @@ class MainViewModel(private val llamaAndroid: LLamaAndroid = LLamaAndroid.instan
     }
 
     fun clear() {
-        messages = listOf()
+        messages = listOf(ChatMessage("已清除对话历史", MessageType.SYSTEM))
     }
 
     fun log(message: String) {
-        messages += message
+        messages += ChatMessage(message, MessageType.SYSTEM)
     }
 }

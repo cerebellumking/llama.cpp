@@ -19,30 +19,33 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.material3.Button
-import androidx.compose.material3.LocalContentColor
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Surface
-import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.*
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.core.content.getSystemService
+import androidx.core.net.toUri
 import com.example.llama.ui.theme.LlamaAndroidTheme
 import java.io.File
 import java.io.FileOutputStream
 import com.benjaminwan.ocrlibrary.OcrEngine
+import kotlinx.coroutines.delay
 
 class MainActivity(
     activityManager: ActivityManager? = null,
@@ -77,6 +80,20 @@ class MainActivity(
         }
     }
 
+    private val pickImageLauncher = registerForActivityResult(
+        ActivityResultContracts.GetContent()
+    ) { uri ->
+        uri?.let {
+            try {
+                val inputStream = contentResolver.openInputStream(uri)
+                val bitmap = BitmapFactory.decodeStream(inputStream)
+                processImage(bitmap)
+            } catch (e: Exception) {
+                viewModel.log("图片处理失败：${e.message}")
+            }
+        }
+    }
+
     private fun processImage(bitmap: Bitmap) {
         try {
             // 创建临时文件保存图片
@@ -100,6 +117,10 @@ class MainActivity(
     private fun takePicture() {
         val intent = Intent(MediaStore.ACTION_IMAGE_CAPTURE)
         takePictureLauncher.launch(intent)
+    }
+
+    fun pickImage() {
+        pickImageLauncher.launch("image/*")
     }
 
     private fun checkCameraPermission() {
@@ -192,41 +213,282 @@ fun MainCompose(
     models: List<Downloadable>,
     activity: MainActivity
 ) {
-    Column {
-        val scrollState = rememberLazyListState()
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color(0xFF1A1A1A))
+    ) {
+        // 应用栏
+        AppBar(models, viewModel, dm)
 
-        Box(modifier = Modifier.weight(1f)) {
-            LazyColumn(state = scrollState) {
-                items(viewModel.messages) {
-                    Text(
-                        it,
-                        style = MaterialTheme.typography.bodyLarge.copy(color = LocalContentColor.current),
-                        modifier = Modifier.padding(16.dp)
+        // 聊天区域
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth()
+        ) {
+            val scrollState = rememberLazyListState()
+            
+            LazyColumn(
+                state = scrollState,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(horizontal = 16.dp)
+            ) {
+                items(viewModel.messages) { chatMessage ->
+                    MessageItem(
+                        content = chatMessage.content,
+                        isUserInput = chatMessage.type == MessageType.USER
                     )
                 }
             }
         }
+
+        // 输入区域
+        InputArea(
+            viewModel = viewModel,
+            onSend = { viewModel.send() },
+            onCamera = { activity.startCamera() },
+            activity = activity
+        )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun AppBar(
+    models: List<Downloadable>,
+    viewModel: MainViewModel,
+    dm: DownloadManager
+) {
+    var showMenu by remember { mutableStateOf(false) }
+    var downloadingModel by remember { mutableStateOf<Downloadable?>(null) }
+    var downloadProgress by remember { mutableDoubleStateOf(0.0) }
+    var downloadId by remember { mutableLongStateOf(-1L) }
+
+    // 监听下载进度
+    LaunchedEffect(downloadId) {
+        if (downloadId != -1L) {
+            while (true) {
+                val cursor = dm.query(DownloadManager.Query().setFilterById(downloadId))
+                if (cursor != null && cursor.moveToFirst()) {
+                    val bytesDownloaded = cursor.getLong(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_BYTES_DOWNLOADED_SO_FAR))
+                    val bytesTotal = cursor.getLong(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_TOTAL_SIZE_BYTES))
+                    downloadProgress = bytesDownloaded.toDouble() / bytesTotal
+                    
+                    if (bytesDownloaded == bytesTotal) {
+                        // 下载完成后加载模型
+                        downloadingModel?.let { model ->
+                            viewModel.clear() // 清除之前的对话
+                            viewModel.load(model.destination.path)
+                        }
+                        downloadingModel = null
+                        downloadId = -1L
+                        downloadProgress = 0.0
+                        break
+                    }
+                }
+                cursor?.close()
+                delay(1000)
+            }
+        }
+    }
+
+    TopAppBar(
+        title = {
+            Text(
+                text = "RouteLLM",
+                color = Color.White,
+                fontSize = 20.sp,
+                fontWeight = FontWeight.Bold
+            )
+        },
+        navigationIcon = {
+            IconButton(onClick = { showMenu = !showMenu }) {
+                Icon(
+                    imageVector = Icons.Default.Menu,
+                    contentDescription = "Menu",
+                    tint = Color.White
+                )
+            }
+        },
+        actions = {
+            IconButton(onClick = { /* TODO */ }) {
+                Icon(
+                    imageVector = Icons.Default.Headset,
+                    contentDescription = "Headphone",
+                    tint = Color.White
+                )
+            }
+            IconButton(onClick = { /* TODO */ }) {
+                Icon(
+                    imageVector = Icons.Default.MoreVert,
+                    contentDescription = "More",
+                    tint = Color.White
+                )
+            }
+        },
+        colors = TopAppBarDefaults.topAppBarColors(
+            containerColor = Color(0xFF6200EE)
+        )
+    )
+
+    if (showMenu) {
+        DropdownMenu(
+            expanded = showMenu,
+            onDismissRequest = { showMenu = false },
+            modifier = Modifier
+                .background(Color(0xFF2C2C2C))
+                .width(300.dp)
+        ) {
+            Text(
+                text = "可用模型",
+                color = Color.White,
+                fontSize = 18.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(16.dp)
+            )
+            Divider(color = Color.Gray)
+            models.forEach { model ->
+                DropdownMenuItem(
+                    text = {
+                        Column {
+                            Text(
+                                text = model.name,
+                                color = Color.White
+                            )
+                            if (downloadingModel == model) {
+                                LinearProgressIndicator(
+                                    progress = downloadProgress.toFloat(),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(top = 8.dp),
+                                    color = Color(0xFF6200EE),
+                                    trackColor = Color.Gray
+                                )
+                                Text(
+                                    text = "${(downloadProgress * 100).toInt()}%",
+                                    color = Color.White,
+                                    fontSize = 12.sp,
+                                    modifier = Modifier.padding(top = 4.dp)
+                                )
+                            }
+                        }
+                    },
+                    onClick = {
+                        if (downloadingModel == null) {
+                            if (model.destination.exists()) {
+                                // 如果模型已下载，直接加载
+                                viewModel.clear() // 清除之前的对话
+                                viewModel.load(model.destination.path)
+                                showMenu = false
+                            } else {
+                                // 否则开始下载
+                                val request = DownloadManager.Request(model.source)
+                                    .setTitle(model.name)
+                                    .setDescription("正在下载模型...")
+                                    .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+                                    .setDestinationUri(model.destination.toUri())
+                                downloadId = dm.enqueue(request)
+                                downloadingModel = model
+                                viewModel.log("开始下载模型：${model.name}")
+                            }
+                        }
+                    },
+                    enabled = downloadingModel == null
+                )
+            }
+        }
+    }
+}
+
+@Composable
+fun MessageItem(content: String, isUserInput: Boolean) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp),
+        horizontalAlignment = if (isUserInput) Alignment.End else Alignment.Start
+    ) {
+        Box(
+            modifier = Modifier
+                .widthIn(max = 280.dp)
+                .clip(
+                    RoundedCornerShape(
+                        topStart = 16.dp,
+                        topEnd = 16.dp,
+                        bottomStart = if (isUserInput) 16.dp else 4.dp,
+                        bottomEnd = if (isUserInput) 4.dp else 16.dp
+                    )
+                )
+                .background(
+                    if (isUserInput) Color(0xFF6200EE)
+                    else Color(0xFFF5F5F5)
+                )
+                .padding(12.dp)
+        ) {
+            Text(
+                text = content,
+                color = if (isUserInput) Color.White else Color.Black,
+                fontSize = 16.sp
+            )
+        }
+    }
+}
+
+@Composable
+fun InputArea(
+    viewModel: MainViewModel,
+    onSend: () -> Unit,
+    onCamera: () -> Unit,
+    activity: MainActivity
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Color.White)
+            .padding(8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        // 相机按钮
+        IconButton(onClick = onCamera) {
+            Icon(
+                imageVector = Icons.Default.Camera,
+                contentDescription = "Take Photo",
+                tint = Color(0xFF6200EE)
+            )
+        }
+        
+        // 相册按钮
+        IconButton(onClick = { activity.pickImage() }) {
+            Icon(
+                imageVector = Icons.Default.Image,
+                contentDescription = "Pick Image",
+                tint = Color(0xFF6200EE)
+            )
+        }
+
         OutlinedTextField(
             value = viewModel.message,
             onValueChange = { viewModel.updateMessage(it) },
-            label = { Text("Message") },
+            modifier = Modifier
+                .weight(1f)
+                .padding(horizontal = 8.dp),
+            placeholder = { Text("输入消息...") },
+            shape = RoundedCornerShape(24.dp),
+            colors = OutlinedTextFieldDefaults.colors(
+                focusedBorderColor = Color(0xFF6200EE),
+                unfocusedBorderColor = Color(0xFFE0E0E0)
+            )
         )
-        Row {
-            Button({ viewModel.send() }) { Text("Send") }
-            Button({ viewModel.bench(8, 4, 1) }) { Text("Bench") }
-            Button({ viewModel.clear() }) { Text("Clear") }
-            Button({
-                viewModel.messages.joinToString("\n").let {
-                    clipboard.setPrimaryClip(ClipData.newPlainText("", it))
-                }
-            }) { Text("Copy") }
-            Button({ activity.startCamera() }) { Text("拍照") }
-        }
 
-        Column {
-            for (model in models) {
-                Downloadable.Button(viewModel, dm, model)
-            }
+        Button(
+            onClick = onSend,
+            colors = ButtonDefaults.buttonColors(
+                containerColor = Color(0xFF6200EE)
+            )
+        ) {
+            Text("发送")
         }
     }
 }
