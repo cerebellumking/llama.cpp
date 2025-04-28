@@ -108,7 +108,20 @@ class MainActivity(
             // 调用OCR引擎
             val result = ocrEngine.detect(bitmap, outputBitmap, 1024)
             val allText = result.strRes
-            viewModel.log("识别到的文字：$allText")
+            
+            // 清洗OCR结果
+            val cleanedText = allText.trim()
+                .replace(Regex("\\s+"), " ") // 将多个空白字符替换为单个空格
+                .replace(Regex("[^\\p{L}\\p{N}\\p{P}\\s]"), "") // 只保留字母、数字、标点和空白字符
+            
+            // 输出OCR结果用于调试
+            viewModel.log("OCR原始结果：$allText")
+            viewModel.log("OCR清洗后结果：$cleanedText")
+            
+            // 将清洗后的文本发送给大模型
+            viewModel.updateMessage("请解读病例报告并给出简短建议：" + cleanedText)
+            viewModel.send()
+            
         } catch (e: Exception) {
             viewModel.log("文字识别失败：${e.message}")
         }
@@ -226,6 +239,7 @@ fun MainCompose(
             modifier = Modifier
                 .weight(1f)
                 .fillMaxWidth()
+                .background(Color.White)
         ) {
             val scrollState = rememberLazyListState()
             
@@ -410,27 +424,35 @@ fun MessageItem(content: String, isUserInput: Boolean) {
             .padding(vertical = 4.dp),
         horizontalAlignment = if (isUserInput) Alignment.End else Alignment.Start
     ) {
-        Box(
-            modifier = Modifier
-                .widthIn(max = 280.dp)
-                .clip(
-                    RoundedCornerShape(
-                        topStart = 16.dp,
-                        topEnd = 16.dp,
-                        bottomStart = if (isUserInput) 16.dp else 4.dp,
-                        bottomEnd = if (isUserInput) 4.dp else 16.dp
+        if (isUserInput) {
+            // 用户输入使用对话框样式
+            Box(
+                modifier = Modifier
+                    .widthIn(max = 280.dp)
+                    .clip(
+                        RoundedCornerShape(
+                            topStart = 16.dp,
+                            topEnd = 16.dp,
+                            bottomStart = 16.dp,
+                            bottomEnd = 4.dp
+                        )
                     )
+                    .background(Color(0xFF6200EE))
+                    .padding(12.dp)
+            ) {
+                Text(
+                    text = content,
+                    color = Color.White,
+                    fontSize = 16.sp
                 )
-                .background(
-                    if (isUserInput) Color(0xFF6200EE)
-                    else Color(0xFFF5F5F5)
-                )
-                .padding(12.dp)
-        ) {
+            }
+        } else {
+            // 系统输出使用普通文本样式
             Text(
                 text = content,
-                color = if (isUserInput) Color.White else Color.Black,
-                fontSize = 16.sp
+                color = Color.Black,
+                fontSize = 16.sp,
+                modifier = Modifier.padding(horizontal = 16.dp)
             )
         }
     }

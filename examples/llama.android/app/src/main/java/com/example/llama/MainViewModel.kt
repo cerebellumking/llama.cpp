@@ -58,7 +58,10 @@ class MainViewModel(private val llamaAndroid: LLamaAndroid = LLamaAndroid.instan
         messages += ChatMessage("", MessageType.SYSTEM)
 
         viewModelScope.launch {
-            llamaAndroid.send(text)
+            // 构建完整的对话历史，包含系统提示词
+            val fullPrompt = "You are Qwen, created by Alibaba Cloud. You are a helpful assistant.\n\nUser: $text\n\nAssistant:"
+            
+            llamaAndroid.send(fullPrompt)
                 .catch {
                     Log.e(tag, "send() failed", it)
                     messages += ChatMessage(it.message!!, MessageType.SYSTEM)
@@ -107,7 +110,8 @@ class MainViewModel(private val llamaAndroid: LLamaAndroid = LLamaAndroid.instan
                 }
                 // 加载新模型
                 llamaAndroid.load(pathToModel)
-                messages += ChatMessage("已切换到模型：$pathToModel", MessageType.SYSTEM)
+                val fileName = pathToModel.substringAfterLast("/")
+                messages += ChatMessage("已切换到模型：$fileName", MessageType.SYSTEM)
             } catch (exc: IllegalStateException) {
                 Log.e(tag, "load() failed", exc)
                 messages += ChatMessage(exc.message!!, MessageType.SYSTEM)
