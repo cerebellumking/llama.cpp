@@ -1,5 +1,6 @@
 package com.example.llama
 
+import android.graphics.Bitmap
 import android.llama.cpp.LLamaAndroid
 import android.util.Log
 import androidx.compose.runtime.getValue
@@ -7,6 +8,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.llama.api.DeepseekApiService
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.launch
 
@@ -16,13 +18,23 @@ enum class MessageType {
     SYSTEM,  // 系统输出
 }
 
+// 推理模式枚举
+enum class InferenceMode {
+    LOCAL,   // 本地推理
+    API      // API推理
+}
+
 // 消息数据类
 data class ChatMessage(
     val content: String,
-    val type: MessageType
+    val type: MessageType,
+    val image: Bitmap? = null
 )
 
-class MainViewModel(private val llamaAndroid: LLamaAndroid = LLamaAndroid.instance()): ViewModel() {
+class MainViewModel(
+    private val llamaAndroid: LLamaAndroid = LLamaAndroid.instance(),
+    private val apiService: DeepseekApiService = DeepseekApiService.getInstance()
+): ViewModel() {
     companion object {
         @JvmStatic
         private val NanosPerSecond = 1_000_000_000.0
@@ -35,11 +47,15 @@ class MainViewModel(private val llamaAndroid: LLamaAndroid = LLamaAndroid.instan
 
     var message by mutableStateOf("")
         private set
-        
+
     // 添加推理速度状态
     var inferenceSpeed by mutableStateOf(0.0)
         private set
-        
+
+    // 添加推理模式状态
+    var inferenceMode by mutableStateOf(InferenceMode.LOCAL)
+        private set
+
     private var lastTokenTime = System.nanoTime()
     private var tokenCount = 0
     private var isFirstToken = true
@@ -64,7 +80,7 @@ class MainViewModel(private val llamaAndroid: LLamaAndroid = LLamaAndroid.instan
         messages += ChatMessage(text, MessageType.USER)
         // 添加空的系统消息，用于接收输出
         messages += ChatMessage("", MessageType.SYSTEM)
-        
+
         // 重置推理速度计数
         lastTokenTime = System.nanoTime()
         tokenCount = 0
@@ -73,33 +89,58 @@ class MainViewModel(private val llamaAndroid: LLamaAndroid = LLamaAndroid.instan
 
         viewModelScope.launch {
             // 构建完整的对话历史，包含系统提示词
-            val fullPrompt = "You are Qwen, created by Alibaba Cloud. You are a helpful assistant.\n\nUser: $text\n\nAssistant:"
-            
-            llamaAndroid.send(fullPrompt)
-                .catch {
-                    Log.e(tag, "send() failed", it)
-                    messages += ChatMessage(it.message!!, MessageType.SYSTEM)
-                }
-                .collect { (str, tokens) -> 
-                    // 更新最后一条系统消息
-                    val lastMessage = messages.last()
-                    messages = messages.dropLast(1) + ChatMessage(lastMessage.content + str, MessageType.SYSTEM)
-                    
-                    // 更新token计数
-                    tokenCount += tokens
-                    val currentTime = System.nanoTime()
-                    val timeDiff = (currentTime - lastTokenTime) / NanosPerSecond
-                    
-                    if (isFirstToken) {
-                        // 第一个token不计入速度统计
-                        lastTokenTime = currentTime
-                        isFirstToken = false
-                    } else if (timeDiff >= 1.0) { // 每秒更新一次速度
-                        inferenceSpeed = tokenCount / timeDiff
-                        lastTokenTime = currentTime
-                        tokenCount = 0
+
+            try {
+                when (inferenceMode) {
+                    InferenceMode.LOCAL -> {
+                        val fullPrompt = "You are Qwen, created by Alibaba Cloud. You are a helpful assistant.\n\nUser: $text\n\nAssistant:"
+                        llamaAndroid.send(fullPrompt)
+                            .catch {
+                                Log.e(tag, "send() failed", it)
+                                messages += ChatMessage(it.message!!, MessageType.SYSTEM)
+                            }
+                            .collect { (str, tokens) ->
+                                // 更新最后一条系统消息
+                                updateMessageAndSpeed(str, tokens)
+                            }
+                    }
+                    InferenceMode.API -> {
+                        apiService.send(text)
+                            .catch {
+                                Log.e(tag, "API send() failed", it)
+                                messages += ChatMessage(it.message!!, MessageType.SYSTEM)
+                            }
+                            .collect { (str, tokens) ->
+                                // 更新最后一条系统消息
+                                updateMessageAndSpeed(str, tokens)
+                            }
                     }
                 }
+            } catch (e: Exception) {
+                Log.e(tag, "Error during inference", e)
+                messages += ChatMessage("Error: ${e.message}", MessageType.SYSTEM)
+            }
+        }
+    }
+
+    private fun updateMessageAndSpeed(str: String, tokens: Int) {
+        // 更新最后一条系统消息
+        val lastMessage = messages.last()
+        messages = messages.dropLast(1) + ChatMessage(lastMessage.content + str, MessageType.SYSTEM)
+
+        // 更新token计数
+        tokenCount += tokens
+        val currentTime = System.nanoTime()
+        val timeDiff = (currentTime - lastTokenTime) / NanosPerSecond
+
+        if (isFirstToken) {
+            // 第一个token不计入速度统计
+            lastTokenTime = currentTime
+            isFirstToken = false
+        } else if (timeDiff >= 1.0) { // 每秒更新一次速度
+            inferenceSpeed = tokenCount / timeDiff
+            lastTokenTime = currentTime
+            tokenCount = 0
         }
     }
 
@@ -131,6 +172,9 @@ class MainViewModel(private val llamaAndroid: LLamaAndroid = LLamaAndroid.instan
     fun load(pathToModel: String) {
         viewModelScope.launch {
             try {
+                // 切换到本地模式
+                inferenceMode = InferenceMode.LOCAL
+
                 // 先卸载当前模型
                 try {
                     llamaAndroid.unload()
@@ -159,5 +203,19 @@ class MainViewModel(private val llamaAndroid: LLamaAndroid = LLamaAndroid.instan
 
     fun log(message: String) {
         messages += ChatMessage(message, MessageType.SYSTEM)
+    }
+
+    fun switchToApiMode() {
+        inferenceMode = InferenceMode.API
+        messages += ChatMessage("已切换到 DeepSeek API 模式", MessageType.SYSTEM)
+    }
+
+    fun switchToLocalMode() {
+        inferenceMode = InferenceMode.LOCAL
+        messages += ChatMessage("已切换到本地推理模式", MessageType.SYSTEM)
+    }
+
+    fun addImageMessage(bitmap: Bitmap) {
+        messages += ChatMessage("", MessageType.USER, bitmap)
     }
 }

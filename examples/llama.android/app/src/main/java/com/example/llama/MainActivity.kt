@@ -3,7 +3,6 @@ package com.example.llama
 import android.Manifest
 import android.app.ActivityManager
 import android.app.DownloadManager
-import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -24,7 +23,6 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
@@ -108,20 +106,20 @@ class MainActivity(
             // 调用OCR引擎
             val result = ocrEngine.detect(bitmap, outputBitmap, 1024)
             val allText = result.strRes
-            
+
             // 清洗OCR结果
             val cleanedText = allText.trim()
                 .replace(Regex("\\s+"), " ") // 将多个空白字符替换为单个空格
                 .replace(Regex("[^\\p{L}\\p{N}\\p{P}\\s]"), "") // 只保留字母、数字、标点和空白字符
-            
+
             // 输出OCR结果用于调试
             viewModel.log("OCR原始结果：$allText")
             viewModel.log("OCR清洗后结果：$cleanedText")
-            
+
             // 将清洗后的文本发送给大模型
             viewModel.updateMessage("请解读病例报告并给出简短建议：" + cleanedText)
             viewModel.send()
-            
+
         } catch (e: Exception) {
             viewModel.log("文字识别失败：${e.message}")
         }
@@ -182,21 +180,26 @@ class MainActivity(
         val extFilesDir = getExternalFilesDir(null)
 
         val models = listOf(
+            // API 模型
             Downloadable(
-                "DeepSeek-R1-DRAFT-Qwen2.5-0.5B (Q4_K_M, 0.4 GiB)",
-                Uri.parse("https://huggingface.co/alamios/DeepSeek-R1-DRAFT-Qwen2.5-0.5B-GGUF/resolve/main/DeepSeek-R1-DRAFT-Qwen2.5-0.5B-Q4_K_M.gguf?download=true"),
-                File(extFilesDir, "DeepSeek-R1-DRAFT-Qwen2.5-0.5B-Q4_K_M.gguf"),
+                name = "DeepSeek API",
+                source = null,  // API 模型不需要下载
+                destination = null,  // API 模型不需要本地文件
+                isApiModel = true
+            ),
+            // 本地模型
+            Downloadable(
+                name = "DeepSeek-R1-DRAFT-Qwen2.5-0.5B (Q4_K_M, 0.4 GiB)",
+                source = Uri.parse("https://huggingface.co/alamios/DeepSeek-R1-DRAFT-Qwen2.5-0.5B-GGUF/resolve/main/DeepSeek-R1-DRAFT-Qwen2.5-0.5B-Q4_K_M.gguf?download=true"),
+                destination = File(extFilesDir, "DeepSeek-R1-DRAFT-Qwen2.5-0.5B-Q4_K_M.gguf"),
+                isApiModel = false
             ),
             Downloadable(
-                "DeepSeek-R1-DRAFT-Qwen2.5-0.5B (FP16, 1 GiB)",
-                Uri.parse("https://huggingface.co/alamios/DeepSeek-R1-DRAFT-Qwen2.5-0.5B-GGUF/resolve/main/DeepSeek-R1-DRAFT-Qwen2.5-0.5B-f16.gguf?download=true"),
-                File(extFilesDir, "DeepSeek-R1-DRAFT-Qwen2.5-0.5B-f16.gguf"),
-            ),
-            // Downloadable(
-            //     "Phi 2 DPO (Q3_K_M, 1.48 GiB)",
-            //     Uri.parse("https://huggingface.co/TheBloke/phi-2-dpo-GGUF/resolve/main/phi-2-dpo.Q3_K_M.gguf?download=true"),
-            //     File(extFilesDir, "phi-2-dpo.Q3_K_M.gguf")
-            // ),
+                name = "DeepSeek-R1-DRAFT-Qwen2.5-0.5B (FP16, 1 GiB)",
+                source = Uri.parse("https://huggingface.co/alamios/DeepSeek-R1-DRAFT-Qwen2.5-0.5B-GGUF/resolve/main/DeepSeek-R1-DRAFT-Qwen2.5-0.5B-f16.gguf?download=true"),
+                destination = File(extFilesDir, "DeepSeek-R1-DRAFT-Qwen2.5-0.5B-f16.gguf"),
+                isApiModel = false
+            )
         )
 
         setContent {
@@ -259,7 +262,7 @@ fun MainCompose(
                 .background(Color.White)
         ) {
             val scrollState = rememberLazyListState()
-            
+
             LazyColumn(
                 state = scrollState,
                 modifier = Modifier
@@ -306,12 +309,12 @@ fun AppBar(
                     val bytesDownloaded = cursor.getLong(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_BYTES_DOWNLOADED_SO_FAR))
                     val bytesTotal = cursor.getLong(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_TOTAL_SIZE_BYTES))
                     downloadProgress = bytesDownloaded.toDouble() / bytesTotal
-                    
+
                     if (bytesDownloaded == bytesTotal) {
                         // 下载完成后加载模型
                         downloadingModel?.let { model ->
                             viewModel.clear() // 清除之前的对话
-                            viewModel.load(model.destination.path)
+                            viewModel.load(model.destination!!.path)
                         }
                         downloadingModel = null
                         downloadId = -1L
@@ -380,7 +383,42 @@ fun AppBar(
                 modifier = Modifier.padding(16.dp)
             )
             Divider(color = Color.Gray)
-            models.forEach { model ->
+
+            // API 模型分组
+            Text(
+                text = "API 模型",
+                color = Color.White,
+                fontSize = 16.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+            )
+            models.filter { it.isApiModel }.forEach { model ->
+                DropdownMenuItem(
+                    text = {
+                        Text(
+                            text = model.name,
+                            color = Color.White
+                        )
+                    },
+                    onClick = {
+                        viewModel.clear()
+                        viewModel.switchToApiMode()
+                        showMenu = false
+                    }
+                )
+            }
+
+            Divider(color = Color.Gray)
+
+            // 本地模型分组
+            Text(
+                text = "本地模型",
+                color = Color.White,
+                fontSize = 16.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+            )
+            models.filter { !it.isApiModel }.forEach { model ->
                 DropdownMenuItem(
                     text = {
                         Column {
@@ -408,18 +446,18 @@ fun AppBar(
                     },
                     onClick = {
                         if (downloadingModel == null) {
-                            if (model.destination.exists()) {
+                            if (model.destination?.exists() == true) {
                                 // 如果模型已下载，直接加载
                                 viewModel.clear() // 清除之前的对话
                                 viewModel.load(model.destination.path)
                                 showMenu = false
                             } else {
                                 // 否则开始下载
-                                val request = DownloadManager.Request(model.source)
+                                val request = DownloadManager.Request(model.source!!)
                                     .setTitle(model.name)
                                     .setDescription("正在下载模型...")
                                     .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-                                    .setDestinationUri(model.destination.toUri())
+                                    .setDestinationUri(model.destination!!.toUri())
                                 downloadId = dm.enqueue(request)
                                 downloadingModel = model
                                 viewModel.log("开始下载模型：${model.name}")
@@ -497,7 +535,7 @@ fun InputArea(
                 tint = Color(0xFF6200EE)
             )
         }
-        
+
         // 相册按钮
         IconButton(onClick = { activity.pickImage() }) {
             Icon(

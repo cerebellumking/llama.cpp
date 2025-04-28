@@ -18,7 +18,12 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.io.File
 
-data class Downloadable(val name: String, val source: Uri, val destination: File) {
+data class Downloadable(
+    val name: String,
+    val source: Uri?,
+    val destination: File?,
+    val isApiModel: Boolean = false
+) {
     companion object {
         @JvmStatic
         private val tag: String? = this::class.qualifiedName
@@ -34,7 +39,7 @@ data class Downloadable(val name: String, val source: Uri, val destination: File
         fun Button(viewModel: MainViewModel, dm: DownloadManager, item: Downloadable) {
             var status: State by remember {
                 mutableStateOf(
-                    if (item.destination.exists()) Downloaded(item)
+                    if (item.destination?.exists() == true) Downloaded(item)
                     else Ready
                 )
             }
@@ -76,7 +81,7 @@ data class Downloadable(val name: String, val source: Uri, val destination: File
             fun onClick() {
                 when (val s = status) {
                     is Downloaded -> {
-                        viewModel.load(item.destination.path)
+                        viewModel.load(item.destination?.path ?: "")
                     }
 
                     is Downloading -> {
@@ -86,17 +91,16 @@ data class Downloadable(val name: String, val source: Uri, val destination: File
                     }
 
                     else -> {
-                        item.destination.delete()
+                        item.destination?.delete()
 
-                        val request = DownloadManager.Request(item.source).apply {
-                            setTitle("Downloading model")
-                            setDescription("Downloading model: ${item.name}")
-                            setAllowedNetworkTypes(DownloadManager.Request.NETWORK_WIFI)
-                            setDestinationUri(item.destination.toUri())
-                        }
+                        val request = DownloadManager.Request(item.source ?: Uri.EMPTY)
+                        request.setTitle("Downloading model")
+                        request.setDescription("Downloading model: ${item.name}")
+                        request.setAllowedNetworkTypes(DownloadManager.Request.NETWORK_WIFI)
+                        request.setDestinationUri(item.destination?.toUri())
 
-                        viewModel.log("Saving ${item.name} to ${item.destination.path}")
-                        Log.i(tag, "Saving ${item.name} to ${item.destination.path}")
+                        viewModel.log("Saving ${item.name} to ${item.destination?.path}")
+                        Log.i(tag, "Saving ${item.name} to ${item.destination?.path}")
 
                         val id = dm.enqueue(request)
                         status = Downloading(id)
@@ -114,6 +118,5 @@ data class Downloadable(val name: String, val source: Uri, val destination: File
                 }
             }
         }
-
     }
 }
