@@ -35,6 +35,14 @@ class MainViewModel(private val llamaAndroid: LLamaAndroid = LLamaAndroid.instan
 
     var message by mutableStateOf("")
         private set
+        
+    // 添加推理速度状态
+    var inferenceSpeed by mutableStateOf(0.0)
+        private set
+        
+    private var lastTokenTime = System.nanoTime()
+    private var tokenCount = 0
+    private var isFirstToken = true
 
     override fun onCleared() {
         super.onCleared()
@@ -56,6 +64,12 @@ class MainViewModel(private val llamaAndroid: LLamaAndroid = LLamaAndroid.instan
         messages += ChatMessage(text, MessageType.USER)
         // 添加空的系统消息，用于接收输出
         messages += ChatMessage("", MessageType.SYSTEM)
+        
+        // 重置推理速度计数
+        lastTokenTime = System.nanoTime()
+        tokenCount = 0
+        inferenceSpeed = 0.0
+        isFirstToken = true
 
         viewModelScope.launch {
             // 构建完整的对话历史，包含系统提示词
@@ -66,10 +80,25 @@ class MainViewModel(private val llamaAndroid: LLamaAndroid = LLamaAndroid.instan
                     Log.e(tag, "send() failed", it)
                     messages += ChatMessage(it.message!!, MessageType.SYSTEM)
                 }
-                .collect { 
+                .collect { (str, tokens) -> 
                     // 更新最后一条系统消息
                     val lastMessage = messages.last()
-                    messages = messages.dropLast(1) + ChatMessage(lastMessage.content + it, MessageType.SYSTEM)
+                    messages = messages.dropLast(1) + ChatMessage(lastMessage.content + str, MessageType.SYSTEM)
+                    
+                    // 更新token计数
+                    tokenCount += tokens
+                    val currentTime = System.nanoTime()
+                    val timeDiff = (currentTime - lastTokenTime) / NanosPerSecond
+                    
+                    if (isFirstToken) {
+                        // 第一个token不计入速度统计
+                        lastTokenTime = currentTime
+                        isFirstToken = false
+                    } else if (timeDiff >= 1.0) { // 每秒更新一次速度
+                        inferenceSpeed = tokenCount / timeDiff
+                        lastTokenTime = currentTime
+                        tokenCount = 0
+                    }
                 }
         }
     }
@@ -125,6 +154,7 @@ class MainViewModel(private val llamaAndroid: LLamaAndroid = LLamaAndroid.instan
 
     fun clear() {
         messages = listOf(ChatMessage("已清除对话历史", MessageType.SYSTEM))
+        inferenceSpeed = 0.0
     }
 
     fun log(message: String) {

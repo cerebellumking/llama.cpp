@@ -234,6 +234,23 @@ fun MainCompose(
         // 应用栏
         AppBar(models, viewModel, dm)
 
+        // 推理速度显示
+        if (viewModel.inferenceSpeed > 0) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(Color(0xFF2C2C2C))
+                    .padding(8.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = "推理速度: %.1f tokens/s".format(viewModel.inferenceSpeed),
+                    color = Color.White,
+                    fontSize = 14.sp
+                )
+            }
+        }
+
         // 聊天区域
         Box(
             modifier = Modifier
