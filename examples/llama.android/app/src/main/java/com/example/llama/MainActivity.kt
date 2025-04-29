@@ -39,6 +39,7 @@ import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.core.content.getSystemService
 import androidx.core.net.toUri
+import com.example.llama.api.ApiType
 import com.example.llama.ui.theme.LlamaAndroidTheme
 import java.io.File
 import java.io.FileOutputStream
@@ -183,6 +184,12 @@ class MainActivity(
             // API 模型
             Downloadable(
                 name = "DeepSeek API",
+                source = null,  // API 模型不需要下载
+                destination = null,  // API 模型不需要本地文件
+                isApiModel = true
+            ),
+            Downloadable(
+                name = "Qwen API",
                 source = null,  // API 模型不需要下载
                 destination = null,  // API 模型不需要本地文件
                 isApiModel = true
@@ -402,7 +409,11 @@ fun AppBar(
                     },
                     onClick = {
                         viewModel.clear()
-                        viewModel.switchToApiMode()
+                        when (model.name) {
+                            "DeepSeek API" -> viewModel.switchToApiMode(ApiType.DEEPSEEK)
+                            "Qwen API" -> viewModel.switchToApiMode(ApiType.QWEN)
+                            else -> viewModel.switchToApiMode(ApiType.DEEPSEEK)
+                        }
                         showMenu = false
                     }
                 )

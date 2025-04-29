@@ -8,7 +8,8 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.example.llama.api.DeepseekApiService
+import com.example.llama.api.ApiService
+import com.example.llama.api.ApiType
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.launch
 
@@ -32,8 +33,7 @@ data class ChatMessage(
 )
 
 class MainViewModel(
-    private val llamaAndroid: LLamaAndroid = LLamaAndroid.instance(),
-    private val apiService: DeepseekApiService = DeepseekApiService.getInstance()
+    private val llamaAndroid: LLamaAndroid = LLamaAndroid.instance()
 ): ViewModel() {
     companion object {
         @JvmStatic
@@ -55,6 +55,14 @@ class MainViewModel(
     // 添加推理模式状态
     var inferenceMode by mutableStateOf(InferenceMode.LOCAL)
         private set
+
+    // 添加API类型状态
+    var currentApiType by mutableStateOf(ApiType.DEEPSEEK)
+        private set
+
+    // 获取当前API服务实例
+    private val apiService: ApiService
+        get() = ApiService.getInstance(currentApiType)
 
     private var lastTokenTime = System.nanoTime()
     private var tokenCount = 0
@@ -205,9 +213,16 @@ class MainViewModel(
         messages += ChatMessage(message, MessageType.SYSTEM)
     }
 
-    fun switchToApiMode() {
+    fun switchApiType(type: ApiType) {
+        currentApiType = type
+        val apiService = ApiService.getInstance(type)
+        messages += ChatMessage("已切换到 ${type.name} API 模式", MessageType.SYSTEM)
+    }
+
+    fun switchToApiMode(type: ApiType) {
+        currentApiType = type
         inferenceMode = InferenceMode.API
-        messages += ChatMessage("已切换到 DeepSeek API 模式", MessageType.SYSTEM)
+        messages += ChatMessage("已切换到 ${type.name} API 模式", MessageType.SYSTEM)
     }
 
     fun switchToLocalMode() {
