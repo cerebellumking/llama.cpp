@@ -84,8 +84,14 @@ class MainViewModel(
         val text = message
         message = ""
 
-        // 添加用户消息
-        messages += ChatMessage(text, MessageType.USER)
+        // 检查是否是图片消息（通过检查最后一条消息是否包含图片）
+        val isImageMessage = messages.lastOrNull { it.type == MessageType.USER }?.image != null
+
+        // 如果不是图片消息，则显示用户输入
+        if (!isImageMessage) {
+            messages += ChatMessage(text, MessageType.USER)
+        }
+
         // 添加空的系统消息，用于接收输出
         messages += ChatMessage("", MessageType.SYSTEM)
 

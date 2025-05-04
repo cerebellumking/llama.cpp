@@ -18,7 +18,9 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -32,10 +34,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.core.app.ActivityCompat
+import androidx.compose.ui.window.Dialog
 import androidx.core.content.ContextCompat
 import androidx.core.content.getSystemService
 import androidx.core.net.toUri
@@ -45,6 +48,7 @@ import java.io.File
 import java.io.FileOutputStream
 import com.benjaminwan.ocrlibrary.OcrEngine
 import kotlinx.coroutines.delay
+import androidx.compose.ui.layout.ContentScale
 
 class MainActivity(
     activityManager: ActivityManager? = null,
@@ -117,7 +121,10 @@ class MainActivity(
             viewModel.log("OCR原始结果：$allText")
             viewModel.log("OCR清洗后结果：$cleanedText")
 
-            // 将清洗后的文本发送给大模型
+            // 先添加图片消息
+            viewModel.addImageMessage(bitmap)
+            
+            // 直接发送OCR文本给AI，不显示在界面上
             viewModel.updateMessage("请解读病例报告并给出简短建议：" + cleanedText)
             viewModel.send()
 
@@ -279,7 +286,8 @@ fun MainCompose(
                 items(viewModel.messages) { chatMessage ->
                     MessageItem(
                         content = chatMessage.content,
-                        isUserInput = chatMessage.type == MessageType.USER
+                        isUserInput = chatMessage.type == MessageType.USER,
+                        image = chatMessage.image
                     )
                 }
             }
@@ -483,7 +491,46 @@ fun AppBar(
 }
 
 @Composable
-fun MessageItem(content: String, isUserInput: Boolean) {
+fun ImageViewerDialog(
+    bitmap: Bitmap,
+    onDismiss: () -> Unit
+) {
+    Dialog(onDismissRequest = onDismiss) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .fillMaxHeight(0.8f)
+                .background(Color.Black)
+                .padding(16.dp)
+        ) {
+            Image(
+                bitmap = bitmap.asImageBitmap(),
+                contentDescription = "Full size image",
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Fit
+            )
+            
+            // 关闭按钮
+            IconButton(
+                onClick = onDismiss,
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(8.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Close,
+                    contentDescription = "Close",
+                    tint = Color.White
+                )
+            }
+        }
+    }
+}
+
+@Composable
+fun MessageItem(content: String, isUserInput: Boolean, image: Bitmap? = null) {
+    var showImageViewer by remember { mutableStateOf(false) }
+
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -506,11 +553,25 @@ fun MessageItem(content: String, isUserInput: Boolean) {
                     .background(Color(0xFF6200EE))
                     .padding(12.dp)
             ) {
-                Text(
-                    text = content,
-                    color = Color.White,
-                    fontSize = 16.sp
-                )
+                if (image != null) {
+                    // 如果有图片，显示图片并添加点击事件
+                    Image(
+                        bitmap = image.asImageBitmap(),
+                        contentDescription = "User image",
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 200.dp)
+                            .clickable { showImageViewer = true },
+                        contentScale = ContentScale.Fit
+                    )
+                } else {
+                    // 如果没有图片，显示文本
+                    Text(
+                        text = content,
+                        color = Color.White,
+                        fontSize = 16.sp
+                    )
+                }
             }
         } else {
             // 系统输出使用普通文本样式
@@ -521,6 +582,14 @@ fun MessageItem(content: String, isUserInput: Boolean) {
                 modifier = Modifier.padding(horizontal = 16.dp)
             )
         }
+    }
+
+    // 显示图片查看器对话框
+    if (showImageViewer && image != null) {
+        ImageViewerDialog(
+            bitmap = image,
+            onDismiss = { showImageViewer = false }
+        )
     }
 }
 
