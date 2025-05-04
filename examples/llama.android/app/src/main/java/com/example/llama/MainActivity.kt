@@ -117,24 +117,26 @@ class MainActivity(
             val allText = result.strRes
 
             // 清洗OCR结果
-            var cleanedText = allText.trim()
-                .replace(Regex("\\s+"), " ") // 将多个空白字符替换为单个空格
-                .replace(Regex("[^\\p{L}\\p{N}\\p{P}\\s]"), "") // 只保留字母、数字、标点和空白字符
-
-            // 隐私脱敏处理
-            cleanedText = cleanedText
+            var cleanedText = allText
+                // 通用医师/医生/技师字段
+                .replace(Regex("""\s*(?:[\u4e00-\u9fa5]{1,6})?(医师|医生|技师)[:：]?\s*[\u4e00-\u9fa5]{2,4}""")) { matchResult ->
+                    val prefix = matchResult.value.replace(Regex("""[:：]?\s*[\u4e00-\u9fa5]{2,4}$"""), "")
+                    ""
+                }
+                // 其他常见字段
+                .replace(Regex("""姓名[:：]?\s*[\u4e00-\u9fa5]{2,4}"""), "")
+                .replace(Regex("""患者[:：]?\s*[\u4e00-\u9fa5]{2,4}"""), "")
                 // 替换身份证号
                 .replace(Regex("\\d{17}[\\dXx]"), "")
                 // 替换手机号
                 .replace(Regex("1[3-9]\\d{9}"), "")
-                // 替换常见姓名（可扩展）
-                .replace(Regex("姓名[:：]?[\\u4e00-\\u9fa5]{2,4}"), "")
-                .replace(Regex("医生[:：]?[\\u4e00-\\u9fa5]{2,4}"), "")
-                .replace(Regex("医师[:：]?[\\u4e00-\\u9fa5]{2,4}"), "")
                 // 替换住址
                 .replace(Regex("地址[:：]?[\\u4e00-\\u9fa5A-Za-z0-9\\-]{4,}"), "")
                 // 替换医院名
                 .replace(Regex("[\\u4e00-\\u9fa5]{2,20}医院"), "")
+                .replace(Regex("\\s+"), " ") // 将多个空白字符替换为单个空格
+                .replace(Regex("[^\\p{L}\\p{N}\\p{P}\\s]"), "") // 只保留字母、数字、标点和空白字符
+                .trim()
 
             // 你可以根据实际OCR内容继续扩展正则
 
