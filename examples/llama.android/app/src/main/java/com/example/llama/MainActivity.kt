@@ -117,9 +117,25 @@ class MainActivity(
             val allText = result.strRes
 
             // 清洗OCR结果
-            val cleanedText = allText.trim()
+            var cleanedText = allText.trim()
                 .replace(Regex("\\s+"), " ") // 将多个空白字符替换为单个空格
                 .replace(Regex("[^\\p{L}\\p{N}\\p{P}\\s]"), "") // 只保留字母、数字、标点和空白字符
+
+            // 隐私脱敏处理
+            cleanedText = cleanedText
+                // 替换身份证号
+                .replace(Regex("\\d{17}[\\dXx]"), "[身份证号已遮盖]")
+                // 替换手机号
+                .replace(Regex("1[3-9]\\d{9}"), "[手机号已遮盖]")
+                // 替换常见姓名（可扩展）
+                .replace(Regex("姓名[:：]?[\\u4e00-\\u9fa5]{2,4}"), "姓名:[已遮盖]")
+                .replace(Regex("医生[:：]?[\\u4e00-\\u9fa5]{2,4}"), "医生:[已遮盖]")
+                // 替换住址
+                .replace(Regex("地址[:：]?[\\u4e00-\\u9fa5A-Za-z0-9\\-]{4,}"), "地址:[已遮盖]")
+                // 替换医院名
+                .replace(Regex("[\\u4e00-\\u9fa5]{2,20}医院"), "[医院名已遮盖]")
+
+            // 你可以根据实际OCR内容继续扩展正则
 
             // 输出OCR结果用于调试
             viewModel.log("OCR原始结果：$allText")
