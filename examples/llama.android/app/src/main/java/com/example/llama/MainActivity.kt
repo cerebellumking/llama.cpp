@@ -49,6 +49,10 @@ import java.io.FileOutputStream
 import com.benjaminwan.ocrlibrary.OcrEngine
 import kotlinx.coroutines.delay
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.unit.DpOffset
+import androidx.compose.ui.platform.LocalDensity
 
 class MainActivity(
     activityManager: ActivityManager? = null,
@@ -123,7 +127,7 @@ class MainActivity(
 
             // 先添加图片消息
             viewModel.addImageMessage(bitmap)
-            
+
             // 直接发送OCR文本给AI，不显示在界面上
             viewModel.updateMessage("请解读病例报告并给出简短建议：" + cleanedText)
             viewModel.send()
@@ -314,6 +318,11 @@ fun AppBar(
     var downloadingModel by remember { mutableStateOf<Downloadable?>(null) }
     var downloadProgress by remember { mutableDoubleStateOf(0.0) }
     var downloadId by remember { mutableLongStateOf(-1L) }
+    var currentModelName by remember { mutableStateOf("Hunyuan") }
+
+    // 用于锚定DropdownMenu
+    val menuAnchor = remember { androidx.compose.ui.geometry.Offset(0f, 0f) }
+    var buttonCoords by remember { mutableStateOf<androidx.compose.ui.geometry.Rect?>(null) }
 
     // 监听下载进度
     LaunchedEffect(downloadId) {
@@ -330,6 +339,7 @@ fun AppBar(
                         downloadingModel?.let { model ->
                             viewModel.clear() // 清除之前的对话
                             viewModel.load(model.destination!!.path)
+                            currentModelName = model.name
                         }
                         downloadingModel = null
                         downloadId = -1L
@@ -343,149 +353,157 @@ fun AppBar(
         }
     }
 
-    TopAppBar(
-        title = {
-            Text(
-                text = "RouteLLM",
-                color = Color.White,
-                fontSize = 20.sp,
-                fontWeight = FontWeight.Bold
-            )
-        },
-        navigationIcon = {
-            IconButton(onClick = { showMenu = !showMenu }) {
-                Icon(
-                    imageVector = Icons.Default.Menu,
-                    contentDescription = "Menu",
-                    tint = Color.White
+    Surface(color = Color(0xFF6200EE)) {
+        Box(Modifier.fillMaxWidth().height(56.dp)) {
+            val density = LocalDensity.current
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.align(Alignment.Center)
+            ) {
+                Text(
+                    text = "HeteroSpec",
+                    color = Color.White,
+                    fontSize = 20.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier
                 )
-            }
-        },
-        actions = {
-            IconButton(onClick = { /* TODO */ }) {
-                Icon(
-                    imageVector = Icons.Default.Headset,
-                    contentDescription = "Headphone",
-                    tint = Color.White
-                )
-            }
-            IconButton(onClick = { /* TODO */ }) {
-                Icon(
-                    imageVector = Icons.Default.MoreVert,
-                    contentDescription = "More",
-                    tint = Color.White
-                )
-            }
-        },
-        colors = TopAppBarDefaults.topAppBarColors(
-            containerColor = Color(0xFF6200EE)
-        )
-    )
-
-    if (showMenu) {
-        DropdownMenu(
-            expanded = showMenu,
-            onDismissRequest = { showMenu = false },
-            modifier = Modifier
-                .background(Color(0xFF2C2C2C))
-                .width(300.dp)
-        ) {
-            Text(
-                text = "可用模型",
-                color = Color.White,
-                fontSize = 18.sp,
-                fontWeight = FontWeight.Bold,
-                modifier = Modifier.padding(16.dp)
-            )
-            Divider(color = Color.Gray)
-
-            // API 模型分组
-            Text(
-                text = "API 模型",
-                color = Color.White,
-                fontSize = 16.sp,
-                fontWeight = FontWeight.Bold,
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
-            )
-            models.filter { it.isApiModel }.forEach { model ->
-                DropdownMenuItem(
-                    text = {
-                        Text(
-                            text = model.name,
-                            color = Color.White
+                Spacer(modifier = Modifier.width(8.dp))
+                // 下拉按钮
+                Box {
+                    IconButton(
+                        onClick = { showMenu = true },
+                        modifier = Modifier
+                            .size(32.dp)
+                            .onGloballyPositioned { coords ->
+                                buttonCoords = coords.boundsInWindow()
+                            }
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.ArrowDropDown,
+                            contentDescription = "选择模型",
+                            tint = Color.White
                         )
-                    },
-                    onClick = {
-                        viewModel.clear()
-                        when (model.name) {
-                            "DeepSeek API" -> viewModel.switchToApiMode(ApiType.DEEPSEEK)
-                            "Qwen API" -> viewModel.switchToApiMode(ApiType.QWEN)
-                            else -> viewModel.switchToApiMode(ApiType.DEEPSEEK)
-                        }
-                        showMenu = false
                     }
-                )
-            }
-
-            Divider(color = Color.Gray)
-
-            // 本地模型分组
-            Text(
-                text = "本地模型",
-                color = Color.White,
-                fontSize = 16.sp,
-                fontWeight = FontWeight.Bold,
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
-            )
-            models.filter { !it.isApiModel }.forEach { model ->
-                DropdownMenuItem(
-                    text = {
-                        Column {
-                            Text(
-                                text = model.name,
-                                color = Color.White
+                    DropdownMenu(
+                        expanded = showMenu,
+                        onDismissRequest = { showMenu = false },
+                        offset = buttonCoords?.let { DpOffset(0.dp, with(density) { it.height.toDp() }) } ?: DpOffset(0.dp, 0.dp),
+                        modifier = Modifier
+                            .background(Color(0xFF2C2C2C))
+                            .width(300.dp)
+                    ) {
+                        // API模型分组
+                        Text(
+                            text = "API模型",
+                            color = Color.White,
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                        )
+                        models.filter { it.isApiModel }.forEach { model ->
+                            DropdownMenuItem(
+                                text = { Text(model.name, color = Color.White) },
+                                onClick = {
+                                    viewModel.clear()
+                                    viewModel.switchToApiMode(when (model.name) {
+                                        "DeepSeek API" -> ApiType.DEEPSEEK
+                                        "Qwen API" -> ApiType.QWEN
+                                        else -> ApiType.DEEPSEEK
+                                    })
+                                    currentModelName = model.name
+                                    showMenu = false
+                                },
+                                trailingIcon = {
+                                    if (currentModelName == model.name) {
+                                        Icon(Icons.Default.Check, contentDescription = "已选择", tint = Color.White)
+                                    }
+                                }
                             )
-                            if (downloadingModel == model) {
-                                LinearProgressIndicator(
-                                    progress = downloadProgress.toFloat(),
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(top = 8.dp),
-                                    color = Color(0xFF6200EE),
-                                    trackColor = Color.Gray
-                                )
-                                Text(
-                                    text = "${(downloadProgress * 100).toInt()}%",
-                                    color = Color.White,
-                                    fontSize = 12.sp,
-                                    modifier = Modifier.padding(top = 4.dp)
-                                )
+                            Divider(color = Color.Gray.copy(alpha = 0.5f))
+                        }
+                        // 本地模型分组
+                        Text(
+                            text = "本地模型",
+                            color = Color.White,
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                        )
+                        models.filter { !it.isApiModel }.forEach { model ->
+                            DropdownMenuItem(
+                                text = {
+                                    Column {
+                                        Text(model.name, color = Color.White)
+                                        if (downloadingModel == model) {
+                                            LinearProgressIndicator(
+                                                progress = downloadProgress.toFloat(),
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .padding(top = 8.dp),
+                                                color = Color(0xFF6200EE),
+                                                trackColor = Color.Gray
+                                            )
+                                            Text(
+                                                text = "${(downloadProgress * 100).toInt()}%",
+                                                color = Color.White,
+                                                fontSize = 12.sp,
+                                                modifier = Modifier.padding(top = 4.dp)
+                                            )
+                                        }
+                                    }
+                                },
+                                onClick = {
+                                    if (downloadingModel == null) {
+                                        if (model.destination?.exists() == true) {
+                                            viewModel.clear() // 清除之前的对话
+                                            viewModel.load(model.destination.path)
+                                            currentModelName = model.name
+                                            showMenu = false
+                                        } else {
+                                            val request = DownloadManager.Request(model.source!!)
+                                                .setTitle(model.name)
+                                                .setDescription("正在下载模型...")
+                                                .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+                                                .setDestinationUri(model.destination!!.toUri())
+                                            downloadId = dm.enqueue(request)
+                                            downloadingModel = model
+                                            viewModel.log("开始下载模型：${model.name}")
+                                        }
+                                    }
+                                },
+                                enabled = downloadingModel == null,
+                                trailingIcon = {
+                                    if (currentModelName == model.name) {
+                                        Icon(Icons.Default.Check, contentDescription = "已选择", tint = Color.White)
+                                    }
+                                }
+                            )
+                            if (models.indexOf(model) < models.filter { !it.isApiModel }.size - 1) {
+                                Divider(color = Color.Gray.copy(alpha = 0.5f))
                             }
                         }
-                    },
-                    onClick = {
-                        if (downloadingModel == null) {
-                            if (model.destination?.exists() == true) {
-                                // 如果模型已下载，直接加载
-                                viewModel.clear() // 清除之前的对话
-                                viewModel.load(model.destination.path)
-                                showMenu = false
-                            } else {
-                                // 否则开始下载
-                                val request = DownloadManager.Request(model.source!!)
-                                    .setTitle(model.name)
-                                    .setDescription("正在下载模型...")
-                                    .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-                                    .setDestinationUri(model.destination!!.toUri())
-                                downloadId = dm.enqueue(request)
-                                downloadingModel = model
-                                viewModel.log("开始下载模型：${model.name}")
-                            }
-                        }
-                    },
-                    enabled = downloadingModel == null
-                )
+                    }
+                }
             }
+            // 右侧功能按钮
+//            Row(
+//                modifier = Modifier.align(Alignment.CenterEnd)
+//            ) {
+//                IconButton(onClick = { /* TODO */ }) {
+//                    Icon(
+//                        imageVector = Icons.Default.Headset,
+//                        contentDescription = "Headphone",
+//                        tint = Color.White
+//                    )
+//                }
+//                IconButton(onClick = { /* TODO */ }) {
+//                    Icon(
+//                        imageVector = Icons.Default.MoreVert,
+//                        contentDescription = "More",
+//                        tint = Color.White
+//                    )
+//                }
+//            }
         }
     }
 }
@@ -509,7 +527,7 @@ fun ImageViewerDialog(
                 modifier = Modifier.fillMaxSize(),
                 contentScale = ContentScale.Fit
             )
-            
+
             // 关闭按钮
             IconButton(
                 onClick = onDismiss,
