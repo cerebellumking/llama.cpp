@@ -22,7 +22,8 @@ data class Downloadable(
     val name: String,
     val source: Uri?,
     val destination: File?,
-    val isApiModel: Boolean = false
+    val isApiModel: Boolean = false,
+    val isHetero: Boolean = false
 ) {
     companion object {
         @JvmStatic
@@ -81,7 +82,7 @@ data class Downloadable(
             fun onClick() {
                 when (val s = status) {
                     is Downloaded -> {
-                        viewModel.load(item.destination?.path ?: "")
+                        viewModel.load(item.destination?.path ?: "", item.isHetero)
                     }
 
                     is Downloading -> {

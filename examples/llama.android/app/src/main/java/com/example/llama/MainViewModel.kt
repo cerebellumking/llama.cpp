@@ -22,7 +22,8 @@ enum class MessageType {
 // 推理模式枚举
 enum class InferenceMode {
     LOCAL,   // 本地推理
-    API      // API推理
+    API,     // API推理
+    HETERO   // 异构推理
 }
 
 // 消息数据类
@@ -129,6 +130,18 @@ class MainViewModel(
                                 updateMessageAndSpeed(str, tokens)
                             }
                     }
+                    InferenceMode.HETERO -> {
+                        val fullPrompt = "You are Qwen, created by Alibaba Cloud. You are a helpful assistant.\n\nUser: $text\n\nAssistant:"
+                        llamaAndroid.sendHetero(fullPrompt)
+                            .catch {
+                                Log.e(tag, "send() failed", it)
+                                messages += ChatMessage(it.message!!, MessageType.SYSTEM)
+                            }
+                            .collect { (str, tokens) ->
+                                // 更新最后一条系统消息
+                                updateMessageAndSpeed(str, tokens)
+                            }
+                    }
                 }
             } catch (e: Exception) {
                 Log.e(tag, "Error during inference", e)
@@ -183,11 +196,15 @@ class MainViewModel(
         }
     }
 
-    fun load(pathToModel: String) {
+    fun load(pathToModel: String, isHetero: Boolean = false) {
         viewModelScope.launch {
             try {
                 // 切换到本地模式
-                inferenceMode = InferenceMode.LOCAL
+                if(isHetero) {
+                    inferenceMode = InferenceMode.HETERO
+                } else {
+                    inferenceMode = InferenceMode.LOCAL
+                }
 
                 // 先卸载当前模型
                 try {
@@ -198,7 +215,11 @@ class MainViewModel(
                 // 加载新模型
                 llamaAndroid.load(pathToModel)
                 val fileName = pathToModel.substringAfterLast("/")
-                messages += ChatMessage("已切换到模型：$fileName", MessageType.SYSTEM)
+                if(isHetero){
+                    messages += ChatMessage("使用草稿模型：$fileName", MessageType.SYSTEM)
+                } else {
+                    messages += ChatMessage("已切换到模型：$fileName", MessageType.SYSTEM)
+                }
             } catch (exc: IllegalStateException) {
                 Log.e(tag, "load() failed", exc)
                 messages += ChatMessage(exc.message!!, MessageType.SYSTEM)
@@ -219,21 +240,10 @@ class MainViewModel(
         messages += ChatMessage(message, MessageType.SYSTEM)
     }
 
-    fun switchApiType(type: ApiType) {
-        currentApiType = type
-        val apiService = ApiService.getInstance(type)
-        messages += ChatMessage("已切换到 ${type.name} API 模式", MessageType.SYSTEM)
-    }
-
     fun switchToApiMode(type: ApiType) {
         currentApiType = type
         inferenceMode = InferenceMode.API
         messages += ChatMessage("已切换到 ${type.name} API 模式", MessageType.SYSTEM)
-    }
-
-    fun switchToLocalMode() {
-        inferenceMode = InferenceMode.LOCAL
-        messages += ChatMessage("已切换到本地推理模式", MessageType.SYSTEM)
     }
 
     fun addImageMessage(bitmap: Bitmap) {
