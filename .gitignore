@@ -146,3 +146,7 @@ poetry.toml
 # Local scripts
 /run-vim.sh
 /run-chat.sh
+
+examples/llama.android/llama/src/main/cpp/third_party
+examples/llama.android/llama/src/main/cpp/websocketpp
+examples/llama.android/llama/src/main/cpp/asio

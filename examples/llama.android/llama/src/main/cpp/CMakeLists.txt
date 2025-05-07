@@ -34,6 +34,17 @@ project("llama-android")
 #load local llama.cpp
 add_subdirectory(../../../../../../ build-llama)
 
+set(OPENSSL_ROOT_DIR "")
+
+
+add_definitions(-DASIO_STANDALONE)
+## 添加WebSocket++和ASIO的本地路径
+include_directories(
+    ${OPENSSL_ROOT_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/asio/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/websocketpp
+)
+
 # In order to load a library into your app from Java/Kotlin, you must call
 # System.loadLibrary() and pass the name of the library defined here;
 # for GameActivity/NativeActivity derived applications, the same library name must be
@@ -46,8 +57,10 @@ add_library(${CMAKE_PROJECT_NAME} SHARED
 # can link libraries from various origins, such as libraries defined in this
 # build script, prebuilt third-party libraries, or Android system libraries.
 target_link_libraries(${CMAKE_PROJECT_NAME}
-        # List libraries link to the target library
         llama
         common
         android
+        ${OPENSSL_ROOT_DIR}/libssl_3.so
+        ${OPENSSL_ROOT_DIR}/libcrypto_3.so
         log)
+

@@ -6,7 +6,11 @@
 #include <unistd.h>
 #include "llama.h"
 #include "common.h"
-
+#include "speculative.h"
+#include "websocketpp/client.hpp"
+#include "websocketpp/config/asio_client.hpp"
+#include "json.hpp"
+#include <thread>
 // Write C++ code here.
 //
 // Do not forget to dynamically load the C++ library into your application.
@@ -450,4 +454,276 @@ extern "C"
 JNIEXPORT void JNICALL
 Java_android_llama_cpp_LLamaAndroid_kv_1cache_1clear(JNIEnv *, jobject, jlong context) {
     llama_kv_self_clear(reinterpret_cast<llama_context *>(context));
+}
+
+// HeteroSpec
+
+// WebSocket客户端类型定义
+typedef websocketpp::client<websocketpp::config::asio_client> ws_client;
+
+// 全局状态
+struct CloudState {
+    ws_client client;
+    websocketpp::connection_hdl connection;
+    std::string server_url;
+    bool is_connected = false;
+    std::vector<int> accepted_tokens;
+    std::mutex mutex;
+    std::condition_variable cv;
+    std::vector<llama_token> prompt_tokens;
+    llama_token last_token;
+    std::thread client_thread;
+    std::condition_variable connect_cv;  // 添加连接状态条件变量
+    bool connection_ready = false;       // 添加连接就绪标志
+};
+
+// 修改 WebSocket 初始化函数
+bool init_websocket(CloudState& state, const std::string& url) {
+    if (state.is_connected) return true;
+
+    state.client.set_access_channels(websocketpp::log::alevel::all);
+    state.client.clear_access_channels(websocketpp::log::alevel::frame_payload);
+    state.client.set_error_channels(websocketpp::log::elevel::all);
+
+    // 设置连接打开回调
+    state.client.set_open_handler([&state](websocketpp::connection_hdl hdl) {
+        std::unique_lock<std::mutex> lock(state.mutex);
+        state.connection_ready = true;
+        state.connect_cv.notify_all();
+        LOGi("WebSocket connection opened");
+    });
+
+    state.client.init_asio();
+
+    websocketpp::lib::error_code ec;
+    auto con = state.client.get_connection(url, ec);
+    if (ec) {
+        LOGe("Failed to create connection: %s", ec.message().c_str());
+        return false;
+    }
+
+    state.client.connect(con);
+    
+    // 在单独的线程中运行客户端
+    state.client_thread = std::thread([&state]() {
+        try {
+            state.client.run();
+        } catch (const std::exception& e) {
+            LOGe("WebSocket client thread error: %s", e.what());
+        }
+    });
+
+    // 等待连接建立
+    {
+        std::unique_lock<std::mutex> lock(state.mutex);
+        if (!state.connect_cv.wait_for(lock, std::chrono::seconds(5), [&state] {
+            return state.connection_ready;
+        })) {
+            LOGe("WebSocket connection timeout");
+            return false;
+        }
+    }
+
+    state.is_connected = true;
+    state.connection = con->get_handle();
+    return true;
+}
+
+// 添加清理函数
+extern "C" JNIEXPORT void JNICALL
+Java_android_llama_cpp_LLamaAndroid_heterospec_1cleanup(JNIEnv *env, jobject thiz) {
+    jclass cls = env->GetObjectClass(thiz);
+    jfieldID fid = env->GetFieldID(cls, "nativeStatePtr", "J");
+    auto* state = reinterpret_cast<CloudState*>(env->GetLongField(thiz, fid));
+
+    if (state) {
+        if (state->is_connected) {
+            state->client.stop();
+            if (state->client_thread.joinable()) {
+                state->client_thread.join();
+            }
+        }
+        delete state;
+        env->SetLongField(thiz, fid, 0);
+    }
+}
+
+// 核心函数1: 初始化推测解码
+extern "C" JNIEXPORT jint JNICALL
+Java_android_llama_cpp_LLamaAndroid_heterospec_1init(
+        JNIEnv *env,
+        jobject thiz,
+        jlong context_pointer,
+        jlong batch_pointer,
+        jstring jtext,
+        jboolean format_chat,
+        jint n_len,
+        jstring server_url)
+{
+    cached_token_chars.clear();
+    const auto text = env->GetStringUTFChars(jtext, 0);
+    const auto context = reinterpret_cast<llama_context *>(context_pointer);
+    const auto batch = reinterpret_cast<llama_batch *>(batch_pointer);
+
+    bool parse_special = (format_chat == JNI_TRUE);
+    const auto tokens_list = common_tokenize(context, text, true, parse_special);
+
+    const char *url = env->GetStringUTFChars(server_url, nullptr);
+    auto* state = new CloudState();
+    state->server_url = url;
+
+    // 将状态指针保存到Java对象中
+    jclass cls = env->GetObjectClass(thiz);
+    jfieldID fid = env->GetFieldID(cls, "nativeStatePtr", "J");
+    env->SetLongField(thiz, fid, reinterpret_cast<jlong>(state));
+
+    // 初始化WebSocket连接
+    if (!init_websocket(*state, url)) {
+        env->ReleaseStringUTFChars(server_url, url);
+        env->ReleaseStringUTFChars(jtext, text);
+        return -2;
+    }
+
+    // 保存 prompt tokens 和最后一个 token
+    state->prompt_tokens = tokens_list;
+    state->last_token = tokens_list.back();
+
+    // 发送prefill请求
+    nlohmann::json prefill_msg;
+    prefill_msg["action"] = "prefill";
+    prefill_msg["input_ids"] = tokens_list;
+    websocketpp::lib::error_code ec;
+    try {
+        if (!state->is_connected || !state->connection_ready) {
+            LOGe("WebSocket not connected or not ready");
+            env->ReleaseStringUTFChars(server_url, url);
+            env->ReleaseStringUTFChars(jtext, text);
+            return -2;
+        }
+
+        state->client.send(state->connection, prefill_msg.dump(), websocketpp::frame::opcode::text, ec);
+        if (ec) {
+            LOGe("Failed to send message: %s", ec.message().c_str());
+            env->ReleaseStringUTFChars(server_url, url);
+            env->ReleaseStringUTFChars(jtext, text);
+            return -1;
+        }
+        LOGi("Prefill message sent successfully");
+    } catch (const std::exception& e) {
+        LOGe("Exception while sending message: %s", e.what());
+        env->ReleaseStringUTFChars(server_url, url);
+        env->ReleaseStringUTFChars(jtext, text);
+        return -2;
+    }
+
+    //  prefill draft model
+    auto n_ctx = llama_n_ctx(context);
+    auto n_kv_req = tokens_list.size() + n_len;
+
+    LOGi("n_len = %d, n_ctx = %d, n_kv_req = %d", n_len, n_ctx, n_kv_req);
+
+    if (n_kv_req > n_ctx) {
+        LOGe("error: n_kv_req > n_ctx, the required KV cache size is not big enough");
+    }
+
+    for (auto id : tokens_list) {
+        LOGi("token: `%s`-> %d ", common_token_to_piece(context, id).c_str(), id);
+    }
+
+    common_batch_clear(*batch);
+
+    // evaluate the initial prompt
+    for (auto i = 0; i < tokens_list.size(); i++) {
+        common_batch_add(*batch, tokens_list[i], i, { 0 }, false);
+    }
+
+    // llama_decode will output logits only for the last token of the prompt
+    batch->logits[batch->n_tokens - 1] = true;
+
+    if (llama_decode(context, *batch) != 0) {
+        LOGe("llama_decode() failed");
+    }
+
+    env->ReleaseStringUTFChars(jtext, text);
+
+    return batch->n_tokens;
+}
+
+// 核心函数2: 协同解码循环
+extern "C" JNIEXPORT jstring JNICALL
+Java_android_llama_cpp_LLamaAndroid_heterospec_1loop(
+        JNIEnv *env, jobject thiz,
+        jlong context_pointer, jlong batch_pointer,
+        jlong sampler_pointer, jint n_len,
+        jobject intvar_ncur)
+{
+    // 从Java对象获取状态指针
+    jclass cls = env->GetObjectClass(thiz);
+    jfieldID fid = env->GetFieldID(cls, "nativeStatePtr", "J");
+    auto* state = reinterpret_cast<CloudState*>(env->GetLongField(thiz, fid));
+
+    if (!state || !state->is_connected) {
+        return env->NewStringUTF("");
+    }
+
+    // 1. 本地生成推测token (使用llama.cpp的API)
+    const auto context = reinterpret_cast<llama_context *>(context_pointer);
+    const auto batch   = reinterpret_cast<llama_batch   *>(batch_pointer);
+    const auto sampler = reinterpret_cast<llama_sampler *>(sampler_pointer);
+    const auto model = llama_get_model(context);
+    const auto vocab = llama_model_get_vocab(model);
+
+    struct common_speculative_params params_spec;
+    params_spec.n_draft = 3;
+    params_spec.n_reuse = llama_n_ctx(context) - params_spec.n_draft;
+    params_spec.p_min   = 0.05;
+
+    struct common_speculative * spec = common_speculative_init(context);
+
+    // 使用保存的状态
+    const auto& prompt_tgt = state->prompt_tokens;
+    const auto id_last = state->last_token;
+
+    llama_tokens draft_tokens = common_speculative_gen_draft(spec, params_spec, prompt_tgt, id_last);
+
+    // 更新 last_token
+    if (!draft_tokens.empty()) {
+        state->last_token = draft_tokens.back();
+    }
+
+    // 2. 发送验证请求
+    nlohmann::json verify_msg;
+    verify_msg["action"] = "verify";
+    verify_msg["draft_token_ids"] = draft_tokens;
+
+    websocketpp::lib::error_code ec;
+    try {
+        state->client.send(state->connection, verify_msg.dump(), websocketpp::frame::opcode::text, ec);
+
+        // 等待响应
+        std::unique_lock<std::mutex> lock(state->mutex);
+        if (state->cv.wait_for(lock, std::chrono::seconds(3), [state] {
+            return !state->accepted_tokens.empty();
+        })) {
+            // 合并接受的token和bonus token
+            std::vector<int> final_tokens = state->accepted_tokens;
+
+            // 转换为JSON字符串返回
+            nlohmann::json result;
+            result["tokens"] = final_tokens;
+            result["accepted"] = state->accepted_tokens.size();
+
+            // 重置状态
+            state->accepted_tokens.clear();
+
+            return env->NewStringUTF(result.dump().c_str());
+        }
+    } catch (...) {
+        // 处理错误
+
+        auto c = ec.message();
+        auto d = c;
+    }
+
+    return env->NewStringUTF("");
 }

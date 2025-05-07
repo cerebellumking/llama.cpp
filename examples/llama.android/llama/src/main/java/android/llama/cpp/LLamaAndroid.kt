@@ -37,6 +37,7 @@ class LLamaAndroid {
     }.asCoroutineDispatcher()
 
     private val nlen: Int = 1024
+    private var nativeStatePtr: Long = 0L
 
     private external fun log_to_android()
     private external fun load_model(filename: String): Long
@@ -70,6 +71,23 @@ class LLamaAndroid {
     ): Int
 
     private external fun completion_loop(
+        context: Long,
+        batch: Long,
+        sampler: Long,
+        nLen: Int,
+        ncur: IntVar
+    ): String?
+
+    private external fun heterospec_init(
+        context: Long,
+        batch: Long,
+        text: String,
+        formatChat: Boolean,
+        nLen: Int,
+        serverUrl: String,
+    ): Int
+
+    private external fun heterospec_loop(
         context: Long,
         batch: Long,
         sampler: Long,
@@ -119,13 +137,21 @@ class LLamaAndroid {
     fun sendHetero(message: String, formatChat: Boolean = false): Flow<Pair<String, Int>> = flow {
         when (val state = threadLocalState.get()) {
             is State.Loaded -> {
-                val ncur = IntVar(completion_init(state.context, state.batch, message, formatChat, nlen))
+                val ncur = IntVar(heterospec_init(state.context, state.batch, message, formatChat, nlen, "ws://"))
+                if(ncur.value < 0) {
+                    Log.e(tag, "Heterospec init failed")
+                    emit(Pair("Heterospec init failed", ncur.value))
+                    return@flow
+                }
                 var totalTokens = 0
                 while (ncur.value <= nlen) {
                     val str = completion_loop(state.context, state.batch, state.sampler, nlen, ncur)
-                    totalTokens++
                     if (str == null) {
                         break
+                    }else if(str.isNotEmpty()){
+                        totalTokens++
+                    }else{
+                        continue
                     }
                     emit(Pair(str, totalTokens))
                     totalTokens = 0
@@ -143,9 +169,12 @@ class LLamaAndroid {
                 var totalTokens = 0
                 while (ncur.value <= nlen) {
                     val str = completion_loop(state.context, state.batch, state.sampler, nlen, ncur)
-                    totalTokens++
                     if (str == null) {
                         break
+                    }else if(str.isNotEmpty()){
+                        totalTokens++
+                    }else{
+                        continue
                     }
                     emit(Pair(str, totalTokens))
                     totalTokens = 0
