@@ -137,24 +137,23 @@ class LLamaAndroid {
     fun sendHetero(message: String, formatChat: Boolean = false): Flow<Pair<String, Int>> = flow {
         when (val state = threadLocalState.get()) {
             is State.Loaded -> {
-                val ncur = IntVar(heterospec_init(state.context, state.batch, message, formatChat, nlen, "ws://"))
+                val ncur = IntVar(heterospec_init(state.context, state.batch, message, formatChat, nlen, ""))
                 if(ncur.value < 0) {
                     Log.e(tag, "Heterospec init failed")
                     emit(Pair("Heterospec init failed", ncur.value))
                     return@flow
                 }
                 var totalTokens = 0
+                var curTokens = ncur.value
                 while (ncur.value <= nlen) {
-                    val str = completion_loop(state.context, state.batch, state.sampler, nlen, ncur)
+//                    val str = completion_loop(state.context, state.batch, state.sampler, nlen, ncur)
+                    val str = heterospec_loop(state.context, state.batch, state.sampler, nlen, ncur)
                     if (str == null) {
                         break
-                    }else if(str.isNotEmpty()){
-                        totalTokens++
-                    }else{
-                        continue
                     }
+                    totalTokens = ncur.value - curTokens
+                    curTokens = ncur.value
                     emit(Pair(str, totalTokens))
-                    totalTokens = 0
                 }
                 kv_cache_clear(state.context)
             }
@@ -167,17 +166,15 @@ class LLamaAndroid {
             is State.Loaded -> {
                 val ncur = IntVar(completion_init(state.context, state.batch, message, formatChat, nlen))
                 var totalTokens = 0
+                var curTokens = ncur.value
                 while (ncur.value <= nlen) {
                     val str = completion_loop(state.context, state.batch, state.sampler, nlen, ncur)
                     if (str == null) {
                         break
-                    }else if(str.isNotEmpty()){
-                        totalTokens++
-                    }else{
-                        continue
                     }
+                    totalTokens = ncur.value - curTokens
+                    curTokens = ncur.value
                     emit(Pair(str, totalTokens))
-                    totalTokens = 0
                 }
                 kv_cache_clear(state.context)
             }

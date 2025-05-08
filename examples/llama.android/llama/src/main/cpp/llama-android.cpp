@@ -11,6 +11,7 @@
 #include "websocketpp/config/asio_client.hpp"
 #include "json.hpp"
 #include <thread>
+#include <chrono>
 // Write C++ code here.
 //
 // Do not forget to dynamically load the C++ library into your application.
@@ -471,10 +472,11 @@ struct CloudState {
     std::mutex mutex;
     std::condition_variable cv;
     std::vector<llama_token> prompt_tokens;
+    int n_past;
     llama_token last_token;
     std::thread client_thread;
-    std::condition_variable connect_cv;  // 添加连接状态条件变量
-    bool connection_ready = false;       // 添加连接就绪标志
+    std::condition_variable connect_cv;
+    bool connection_ready = false;
 };
 
 // 修改 WebSocket 初始化函数
@@ -484,6 +486,21 @@ bool init_websocket(CloudState& state, const std::string& url) {
     state.client.set_access_channels(websocketpp::log::alevel::all);
     state.client.clear_access_channels(websocketpp::log::alevel::frame_payload);
     state.client.set_error_channels(websocketpp::log::elevel::all);
+
+    // 设置消息处理回调
+    state.client.set_message_handler([&state](websocketpp::connection_hdl hdl, ws_client::message_ptr msg) {
+        try {
+            auto json_data = nlohmann::json::parse(msg->get_payload());
+            if (json_data.contains("accepted_tokens")) {
+                std::unique_lock<std::mutex> lock(state.mutex);
+                state.accepted_tokens = json_data["accepted_tokens"].get<std::vector<int>>();
+                LOGi("Received accepted tokens: %s", msg->get_payload().c_str());
+                state.cv.notify_all();
+            }
+        } catch (const std::exception& e) {
+            LOGe("Error parsing message: %s", e.what());
+        }
+    });
 
     // 设置连接打开回调
     state.client.set_open_handler([&state](websocketpp::connection_hdl hdl) {
@@ -503,7 +520,7 @@ bool init_websocket(CloudState& state, const std::string& url) {
     }
 
     state.client.connect(con);
-    
+
     // 在单独的线程中运行客户端
     state.client_thread = std::thread([&state]() {
         try {
@@ -516,7 +533,7 @@ bool init_websocket(CloudState& state, const std::string& url) {
     // 等待连接建立
     {
         std::unique_lock<std::mutex> lock(state.mutex);
-        if (!state.connect_cv.wait_for(lock, std::chrono::seconds(5), [&state] {
+        if (!state.connect_cv.wait_for(lock, std::chrono::seconds(10), [&state] {
             return state.connection_ready;
         })) {
             LOGe("WebSocket connection timeout");
@@ -585,7 +602,10 @@ Java_android_llama_cpp_LLamaAndroid_heterospec_1init(
     }
 
     // 保存 prompt tokens 和最后一个 token
-    state->prompt_tokens = tokens_list;
+    llama_tokens prompt_tgt(tokens_list.begin(), tokens_list.end() - 1);
+    prompt_tgt.reserve(llama_n_ctx(context));
+    state->n_past = prompt_tgt.size() - 1;
+    state->prompt_tokens = prompt_tgt;
     state->last_token = tokens_list.back();
 
     // 发送prefill请求
@@ -633,8 +653,8 @@ Java_android_llama_cpp_LLamaAndroid_heterospec_1init(
     common_batch_clear(*batch);
 
     // evaluate the initial prompt
-    for (auto i = 0; i < tokens_list.size(); i++) {
-        common_batch_add(*batch, tokens_list[i], i, { 0 }, false);
+    for (auto i = 0; i < prompt_tgt.size(); i++) {
+        common_batch_add(*batch, prompt_tgt[i], i, { 0 }, false);
     }
 
     // llama_decode will output logits only for the last token of the prompt
@@ -662,6 +682,10 @@ Java_android_llama_cpp_LLamaAndroid_heterospec_1loop(
     jfieldID fid = env->GetFieldID(cls, "nativeStatePtr", "J");
     auto* state = reinterpret_cast<CloudState*>(env->GetLongField(thiz, fid));
 
+    if (!la_int_var) la_int_var = env->GetObjectClass(intvar_ncur);
+    if (!la_int_var_value) la_int_var_value = env->GetMethodID(la_int_var, "getValue", "()I");
+    if (!la_int_var_inc) la_int_var_inc = env->GetMethodID(la_int_var, "inc", "()V");
+
     if (!state || !state->is_connected) {
         return env->NewStringUTF("");
     }
@@ -676,7 +700,7 @@ Java_android_llama_cpp_LLamaAndroid_heterospec_1loop(
     struct common_speculative_params params_spec;
     params_spec.n_draft = 3;
     params_spec.n_reuse = llama_n_ctx(context) - params_spec.n_draft;
-    params_spec.p_min   = 0.05;
+    params_spec.p_min   = 0;
 
     struct common_speculative * spec = common_speculative_init(context);
 
@@ -684,12 +708,12 @@ Java_android_llama_cpp_LLamaAndroid_heterospec_1loop(
     const auto& prompt_tgt = state->prompt_tokens;
     const auto id_last = state->last_token;
 
+    // 生成草稿token
+    auto start = std::chrono::high_resolution_clock::now();
     llama_tokens draft_tokens = common_speculative_gen_draft(spec, params_spec, prompt_tgt, id_last);
-
-    // 更新 last_token
-    if (!draft_tokens.empty()) {
-        state->last_token = draft_tokens.back();
-    }
+    auto end = std::chrono::high_resolution_clock::now();
+    double draft_time = std::chrono::duration<double>(end - start).count();
+    LOGi("Draft generation time: %.3fs, generated %d tokens", draft_time, draft_tokens.size());
 
     // 2. 发送验证请求
     nlohmann::json verify_msg;
@@ -702,27 +726,43 @@ Java_android_llama_cpp_LLamaAndroid_heterospec_1loop(
 
         // 等待响应
         std::unique_lock<std::mutex> lock(state->mutex);
-        if (state->cv.wait_for(lock, std::chrono::seconds(3), [state] {
+        if (state->cv.wait_for(lock, std::chrono::seconds(5), [state] {
             return !state->accepted_tokens.empty();
         })) {
-            // 合并接受的token和bonus token
-            std::vector<int> final_tokens = state->accepted_tokens;
-
-            // 转换为JSON字符串返回
-            nlohmann::json result;
-            result["tokens"] = final_tokens;
-            result["accepted"] = state->accepted_tokens.size();
+            llama_tokens final_tokens = state->accepted_tokens;
+            state->last_token = final_tokens.back();
+            state->prompt_tokens.insert(state->prompt_tokens.end(), state->last_token);
+            state->prompt_tokens.insert(state->prompt_tokens.end(), final_tokens.begin(), final_tokens.end() - 1);
+            state->n_past += (final_tokens.size() - 1);
 
             // 重置状态
             state->accepted_tokens.clear();
+            llama_kv_self_seq_rm(context, 0, state->n_past, -1);
 
-            return env->NewStringUTF(result.dump().c_str());
+            // 处理输出
+            for (const auto& token : final_tokens) {
+                const auto n_cur = env->CallIntMethod(intvar_ncur, la_int_var_value);
+
+                if (llama_vocab_is_eog(vocab, token) || n_cur >= n_len) {
+                    return nullptr;
+                }
+
+                env->CallVoidMethod(intvar_ncur, la_int_var_inc);
+                cached_token_chars += common_token_to_piece(context, token);
+            }
+
+            // 返回生成的文本
+            if (is_valid_utf8(cached_token_chars.c_str())) {
+                auto result = env->NewStringUTF(cached_token_chars.c_str());
+                LOGi("Generated text: %s", cached_token_chars.c_str());
+                cached_token_chars.clear();
+                return result;
+            } else {
+                return env->NewStringUTF("");
+            }
         }
-    } catch (...) {
-        // 处理错误
-
-        auto c = ec.message();
-        auto d = c;
+    } catch (const std::exception& e) {
+        LOGe("Exception in heterospec_loop: %s", e.what());
     }
 
     return env->NewStringUTF("");

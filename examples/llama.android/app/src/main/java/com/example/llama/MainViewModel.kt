@@ -120,7 +120,8 @@ class MainViewModel(
                             }
                     }
                     InferenceMode.API -> {
-                        apiService.send(text)
+                        val fullPrompt = "You are Qwen, created by Alibaba Cloud. You are a helpful assistant.\n\nUser: $text\n\nAssistant:"
+                        apiService.send(fullPrompt)
                             .catch {
                                 Log.e(tag, "API send() failed", it)
                                 messages += ChatMessage(it.message!!, MessageType.SYSTEM)
