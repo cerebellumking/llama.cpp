@@ -700,7 +700,7 @@ Java_android_llama_cpp_LLamaAndroid_heterospec_1loop(
     struct common_speculative_params params_spec;
     params_spec.n_draft = 3;
     params_spec.n_reuse = llama_n_ctx(context) - params_spec.n_draft;
-    params_spec.p_min   = 0;
+    params_spec.p_min   = 0.6f;
 
     struct common_speculative * spec = common_speculative_init(context);
 
@@ -709,11 +709,7 @@ Java_android_llama_cpp_LLamaAndroid_heterospec_1loop(
     const auto id_last = state->last_token;
 
     // 生成草稿token
-    auto start = std::chrono::high_resolution_clock::now();
-    llama_tokens draft_tokens = common_speculative_gen_draft(spec, params_spec, prompt_tgt, id_last);
-    auto end = std::chrono::high_resolution_clock::now();
-    double draft_time = std::chrono::duration<double>(end - start).count();
-    LOGi("Draft generation time: %.3fs, generated %d tokens", draft_time, draft_tokens.size());
+    llama_tokens draft_tokens = speculative_gen_draft(spec, params_spec, prompt_tgt, id_last);
 
     // 2. 发送验证请求
     nlohmann::json verify_msg;
@@ -723,21 +719,20 @@ Java_android_llama_cpp_LLamaAndroid_heterospec_1loop(
     websocketpp::lib::error_code ec;
     try {
         state->client.send(state->connection, verify_msg.dump(), websocketpp::frame::opcode::text, ec);
-
         // 等待响应
         std::unique_lock<std::mutex> lock(state->mutex);
         if (state->cv.wait_for(lock, std::chrono::seconds(5), [state] {
             return !state->accepted_tokens.empty();
         })) {
             llama_tokens final_tokens = state->accepted_tokens;
-            state->last_token = final_tokens.back();
             state->prompt_tokens.insert(state->prompt_tokens.end(), state->last_token);
+            state->last_token = final_tokens.back();
             state->prompt_tokens.insert(state->prompt_tokens.end(), final_tokens.begin(), final_tokens.end() - 1);
-            state->n_past += (final_tokens.size() - 1);
+            state->n_past += final_tokens.size();
 
             // 重置状态
             state->accepted_tokens.clear();
-            llama_kv_self_seq_rm(context, 0, state->n_past, -1);
+            llama_kv_self_seq_rm(context, 0, state->n_past + 1, -1);
 
             // 处理输出
             for (const auto& token : final_tokens) {

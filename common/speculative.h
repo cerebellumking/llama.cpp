@@ -20,6 +20,12 @@ bool common_speculative_are_compatible(
         const struct llama_context * ctx_tgt,
         const struct llama_context * ctx_dft);
 
+llama_tokens speculative_gen_draft(
+        struct common_speculative * spec,
+        struct common_speculative_params   params,
+        const llama_tokens & prompt,
+        llama_token   id_last);
+
 // sample up to n_draft tokens and add them to the batch using the draft model
 llama_tokens common_speculative_gen_draft(
                struct common_speculative * spec,

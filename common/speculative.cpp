@@ -49,10 +49,11 @@ struct common_speculative * common_speculative_init(
         common_params_sampling params;
         params.no_perf = false;
 
-        params.top_k = 10;
-
+        // Greedy sampling
+        params.seed = 0;
+        params.temp = 0;
         params.samplers = {
-            COMMON_SAMPLER_TYPE_TOP_K,
+            COMMON_SAMPLER_TYPE_TEMPERATURE,
         };
 
         result->smpl = common_sampler_init(llama_get_model(ctx_dft), params);
@@ -132,6 +133,70 @@ bool common_speculative_are_compatible(
     }
 
     return true;
+}
+
+llama_tokens speculative_gen_draft(
+        struct common_speculative * spec,
+        struct common_speculative_params params,
+        const llama_tokens & prompt_tgt,
+        llama_token id_last) {
+    auto & batch  = spec->batch;
+    auto & ctx    = spec->ctx;
+    auto & smpl   = spec->smpl;
+
+    llama_tokens result;
+    result.reserve(params.n_draft);
+
+    // prepare a batch to evaluate any new tokens in the prompt
+    common_batch_clear(batch);
+
+    const llama_pos n_past = prompt_tgt.size() ;
+
+    LOG_DBG("%s: n_past = %d\n", __func__, n_past);
+
+    common_batch_clear(batch);
+    common_batch_add  (batch, id_last, n_past, { 0 }, true);
+
+    llama_decode(ctx, batch);
+
+    common_sampler_reset(smpl);
+
+    // sample n_draft tokens from the draft model
+    for (int i = 0; i < params.n_draft; ++i) {
+        common_batch_clear(batch);
+
+        common_sampler_sample(smpl, ctx, 0, true);
+
+        const auto * cur_p = common_sampler_get_candidates(smpl);
+
+        for (int k = 0; k < std::min(3, (int) cur_p->size); ++k) {
+            LOG_DBG(" - draft candidate %3d, pos %3d: %6d (%8.3f) '%s'\n",
+                    k, i, cur_p->data[k].id, cur_p->data[k].p, common_token_to_piece(ctx, cur_p->data[k].id).c_str());
+        }
+
+        // add drafted token for each sequence
+        const llama_token id = cur_p->data[0].id;
+
+        common_sampler_accept(smpl, id, true);
+
+        result.push_back(id);
+
+        if (params.n_draft <= (int) result.size()) {
+            break;
+        }
+
+        // only collect very high-confidence draft tokens
+        if (cur_p->data[0].p < params.p_min) {
+            break;
+        }
+
+        common_batch_add(batch, id, n_past + i + 1, { 0 }, true);
+
+        // evaluate the drafted tokens on the draft model
+        llama_decode(ctx, batch);
+    }
+
+    return result;
 }
 
 llama_tokens common_speculative_gen_draft(
