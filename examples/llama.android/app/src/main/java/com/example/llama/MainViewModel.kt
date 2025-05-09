@@ -65,7 +65,7 @@ class MainViewModel(
     private val apiService: ApiService
         get() = ApiService.getInstance(currentApiType)
 
-    private var lastTokenTime = System.nanoTime()
+    private var lastTokenTime = System.currentTimeMillis()
     private var tokenCount = 0
     private var isFirstToken = true
 
@@ -97,7 +97,7 @@ class MainViewModel(
         messages += ChatMessage("", MessageType.SYSTEM)
 
         // 重置推理速度计数
-        lastTokenTime = System.nanoTime()
+        lastTokenTime = System.currentTimeMillis()
         tokenCount = 0
         inferenceSpeed = 0.0
         isFirstToken = true
@@ -158,8 +158,8 @@ class MainViewModel(
 
         // 更新token计数
         tokenCount += tokens
-        val currentTime = System.nanoTime()
-        val timeDiff = (currentTime - lastTokenTime) / NanosPerSecond
+        val currentTime = System.currentTimeMillis()
+        val timeDiff = (currentTime - lastTokenTime) / 1000.0  // 转换为秒
 
         if (isFirstToken) {
             // 第一个token不计入速度统计
@@ -167,8 +167,6 @@ class MainViewModel(
             isFirstToken = false
         } else if (timeDiff >= 1.0) { // 每秒更新一次速度
             inferenceSpeed = tokenCount / timeDiff
-            lastTokenTime = currentTime
-            tokenCount = 0
         }
     }
 
