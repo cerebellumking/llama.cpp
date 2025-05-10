@@ -165,28 +165,11 @@ llama_tokens speculative_gen_draft(
     for (int i = 0; i < params.n_draft; ++i) {
         common_batch_clear(batch);
 
-        common_sampler_sample(smpl, ctx, 0, true);
-
-        const auto * cur_p = common_sampler_get_candidates(smpl);
-
-        for (int k = 0; k < std::min(3, (int) cur_p->size); ++k) {
-            LOG_DBG(" - draft candidate %3d, pos %3d: %6d (%8.3f) '%s'\n",
-                    k, i, cur_p->data[k].id, cur_p->data[k].p, common_token_to_piece(ctx, cur_p->data[k].id).c_str());
-        }
-
-        // add drafted token for each sequence
-        const llama_token id = cur_p->data[0].id;
-
-        common_sampler_accept(smpl, id, true);
+        const llama_token id = common_sampler_sample(smpl, ctx, 0, true);
 
         result.push_back(id);
 
         if (params.n_draft <= (int) result.size()) {
-            break;
-        }
-
-        // only collect very high-confidence draft tokens
-        if (cur_p->data[0].p < params.p_min) {
             break;
         }
 

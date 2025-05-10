@@ -692,16 +692,13 @@ Java_android_llama_cpp_LLamaAndroid_heterospec_1loop(
 
     // 1. 本地生成推测token (使用llama.cpp的API)
     const auto context = reinterpret_cast<llama_context *>(context_pointer);
-    const auto batch   = reinterpret_cast<llama_batch   *>(batch_pointer);
-    const auto sampler = reinterpret_cast<llama_sampler *>(sampler_pointer);
     const auto model = llama_get_model(context);
     const auto vocab = llama_model_get_vocab(model);
 
     struct common_speculative_params params_spec;
     params_spec.n_draft = 3;
     params_spec.n_reuse = llama_n_ctx(context) - params_spec.n_draft;
-    params_spec.p_min   = 0.6f;
-
+    params_spec.p_min   = 0;
     struct common_speculative * spec = common_speculative_init(context);
 
     // 使用保存的状态
@@ -709,21 +706,27 @@ Java_android_llama_cpp_LLamaAndroid_heterospec_1loop(
     const auto id_last = state->last_token;
 
     // 生成草稿token
+    auto start1 = std::chrono::high_resolution_clock::now();
     llama_tokens draft_tokens = speculative_gen_draft(spec, params_spec, prompt_tgt, id_last);
-
+    auto end1 = std::chrono::high_resolution_clock::now();
+    double draft_time = std::chrono::duration<double>(end1 - start1).count() / params_spec.n_draft;
+    LOGi("Draft generation time: %.3fs, generated %d tokens", draft_time, draft_tokens.size());
     // 2. 发送验证请求
     nlohmann::json verify_msg;
     verify_msg["action"] = "verify";
     verify_msg["draft_token_ids"] = draft_tokens;
 
-    websocketpp::lib::error_code ec;
     try {
-        state->client.send(state->connection, verify_msg.dump(), websocketpp::frame::opcode::text, ec);
+        auto start = std::chrono::high_resolution_clock::now();
+        state->client.send(state->connection, verify_msg.dump(), websocketpp::frame::opcode::text);
         // 等待响应
         std::unique_lock<std::mutex> lock(state->mutex);
         if (state->cv.wait_for(lock, std::chrono::seconds(5), [state] {
             return !state->accepted_tokens.empty();
         })) {
+            auto end = std::chrono::high_resolution_clock::now();
+            double verify_time = std::chrono::duration<double>(end - start).count();
+            LOGi("Verification time: %.3fs", verify_time);
             llama_tokens final_tokens = state->accepted_tokens;
             state->prompt_tokens.insert(state->prompt_tokens.end(), state->last_token);
             state->last_token = final_tokens.back();
