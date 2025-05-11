@@ -483,19 +483,45 @@ struct CloudState {
 bool init_websocket(CloudState& state, const std::string& url) {
     if (state.is_connected) return true;
 
-    state.client.set_access_channels(websocketpp::log::alevel::all);
-    state.client.clear_access_channels(websocketpp::log::alevel::frame_payload);
-    state.client.set_error_channels(websocketpp::log::elevel::all);
+    // 完全禁用所有访问日志（除非调试需要）
+    state.client.clear_access_channels(websocketpp::log::alevel::all);
 
-    // 设置消息处理回调
+    // 只保留最关键的连接状态日志（可选）
+    state.client.set_access_channels(
+            websocketpp::log::alevel::connect |
+            websocketpp::log::alevel::disconnect |
+            websocketpp::log::alevel::fail
+    );
+
+    // 错误日志只保留严重错误
+    state.client.clear_error_channels(websocketpp::log::elevel::all);
+    state.client.set_error_channels(
+            websocketpp::log::elevel::rerror |
+            websocketpp::log::elevel::fatal
+    );
+
+    state.client.set_max_message_size(1024 * 1024);
+    state.client.set_max_http_body_size(1024 * 1024);
+
+    // 优化消息处理回调
     state.client.set_message_handler([&state](websocketpp::connection_hdl hdl, ws_client::message_ptr msg) {
         try {
-            auto json_data = nlohmann::json::parse(msg->get_payload());
-            if (json_data.contains("accepted_tokens")) {
+            const auto* data = reinterpret_cast<const uint8_t*>(msg->get_payload().data());
+            const size_t size = msg->get_payload().size();
+
+            if (size > 0 && data[0] == 0x01) {  // verify消息
+                // 预分配空间，避免重新分配
+                std::vector<int> tokens;
+                tokens.reserve((size - 1) / sizeof(int));
+
+                // 直接复制数据，避免逐字节处理
+                const int* token_ptr = reinterpret_cast<const int*>(data + 1);
+                const size_t num_tokens = (size - 1) / sizeof(int);
+                tokens.assign(token_ptr, token_ptr + num_tokens);
+
                 std::unique_lock<std::mutex> lock(state.mutex);
-                state.accepted_tokens = json_data["accepted_tokens"].get<std::vector<int>>();
-                LOGi("Received accepted tokens: %s", msg->get_payload().c_str());
-                state.cv.notify_all();
+                state.accepted_tokens = std::move(tokens);
+                state.cv.notify_one();  // 使用notify_one替代notify_all
             }
         } catch (const std::exception& e) {
             LOGe("Error parsing message: %s", e.what());
@@ -609,10 +635,6 @@ Java_android_llama_cpp_LLamaAndroid_heterospec_1init(
     state->last_token = tokens_list.back();
 
     // 发送prefill请求
-    nlohmann::json prefill_msg;
-    prefill_msg["action"] = "prefill";
-    prefill_msg["input_ids"] = tokens_list;
-    websocketpp::lib::error_code ec;
     try {
         if (!state->is_connected || !state->connection_ready) {
             LOGe("WebSocket not connected or not ready");
@@ -621,13 +643,17 @@ Java_android_llama_cpp_LLamaAndroid_heterospec_1init(
             return -2;
         }
 
-        state->client.send(state->connection, prefill_msg.dump(), websocketpp::frame::opcode::text, ec);
-        if (ec) {
-            LOGe("Failed to send message: %s", ec.message().c_str());
-            env->ReleaseStringUTFChars(server_url, url);
-            env->ReleaseStringUTFChars(jtext, text);
-            return -1;
-        }
+        // 准备二进制消息
+        std::vector<uint8_t> binary_msg;
+        binary_msg.reserve(1 + tokens_list.size() * sizeof(llama_token));  // 预分配空间
+        binary_msg.push_back(0x00);  // 消息类型：prefill
+
+        // 直接复制token数据
+        const size_t data_size = tokens_list.size() * sizeof(llama_token);
+        binary_msg.resize(1 + data_size);
+        memcpy(binary_msg.data() + 1, tokens_list.data(), data_size);
+
+        state->client.send(state->connection, binary_msg.data(), binary_msg.size(), websocketpp::frame::opcode::binary);
         LOGi("Prefill message sent successfully");
     } catch (const std::exception& e) {
         LOGe("Exception while sending message: %s", e.what());
@@ -712,22 +738,35 @@ Java_android_llama_cpp_LLamaAndroid_heterospec_1loop(
     double draft_time = std::chrono::duration<double>(end1 - start1).count() / params_spec.n_draft;
     LOGi("Draft generation time: %.3fs, generated %d tokens", draft_time, draft_tokens.size());
     // 2. 发送验证请求
-    nlohmann::json verify_msg;
-    verify_msg["action"] = "verify";
-    verify_msg["draft_token_ids"] = draft_tokens;
 
     try {
+        // 准备二进制消息
+        std::vector<uint8_t> binary_msg;
+        binary_msg.reserve(1 + draft_tokens.size() * sizeof(llama_token));  // 预分配空间
+        binary_msg.push_back(0x01);  // 消息类型：verify
+
+        // 直接复制token数据
+        const size_t data_size = draft_tokens.size() * sizeof(llama_token);
+        binary_msg.resize(1 + data_size);
+        memcpy(binary_msg.data() + 1, draft_tokens.data(), data_size);
+
         auto start = std::chrono::high_resolution_clock::now();
-        state->client.send(state->connection, verify_msg.dump(), websocketpp::frame::opcode::text);
-        // 等待响应
+
+        // 发送消息并等待响应
+        state->client.send(state->connection,
+            binary_msg.data(),
+            binary_msg.size(),
+            websocketpp::frame::opcode::binary);
+
         std::unique_lock<std::mutex> lock(state->mutex);
-        if (state->cv.wait_for(lock, std::chrono::seconds(5), [state] {
+        if (state->cv.wait_for(lock, std::chrono::milliseconds(500), [state] {
             return !state->accepted_tokens.empty();
         })) {
             auto end = std::chrono::high_resolution_clock::now();
             double verify_time = std::chrono::duration<double>(end - start).count();
             LOGi("Verification time: %.3fs", verify_time);
-            llama_tokens final_tokens = state->accepted_tokens;
+
+            llama_tokens final_tokens = std::move(state->accepted_tokens);
             state->prompt_tokens.insert(state->prompt_tokens.end(), state->last_token);
             state->last_token = final_tokens.back();
             state->prompt_tokens.insert(state->prompt_tokens.end(), final_tokens.begin(), final_tokens.end() - 1);
