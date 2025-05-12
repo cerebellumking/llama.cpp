@@ -131,7 +131,7 @@ Java_android_llama_cpp_LLamaAndroid_new_1context(JNIEnv *env, jobject, jlong jmo
     ctx_params.n_threads_batch = n_threads;
     ctx_params.n_batch        = 2048;  // 增加批处理大小
 
-    llama_context * context = llama_new_context_with_model(model, ctx_params);
+    llama_context * context = llama_init_from_model(model, ctx_params);
 
     if (!context) {
         LOGe("llama_new_context_with_model() returned null)");
@@ -159,120 +159,6 @@ extern "C"
 JNIEXPORT void JNICALL
 Java_android_llama_cpp_LLamaAndroid_log_1to_1android(JNIEnv *, jobject) {
     llama_log_set(log_callback, NULL);
-}
-
-extern "C"
-JNIEXPORT jstring JNICALL
-Java_android_llama_cpp_LLamaAndroid_bench_1model(
-        JNIEnv *env,
-        jobject,
-        jlong context_pointer,
-        jlong model_pointer,
-        jlong batch_pointer,
-        jint pp,
-        jint tg,
-        jint pl,
-        jint nr
-        ) {
-    auto pp_avg = 0.0;
-    auto tg_avg = 0.0;
-    auto pp_std = 0.0;
-    auto tg_std = 0.0;
-
-    const auto context = reinterpret_cast<llama_context *>(context_pointer);
-    const auto model = reinterpret_cast<llama_model *>(model_pointer);
-    const auto batch = reinterpret_cast<llama_batch *>(batch_pointer);
-
-    const int n_ctx = llama_n_ctx(context);
-
-    LOGi("n_ctx = %d", n_ctx);
-
-    int i, j;
-    int nri;
-    for (nri = 0; nri < nr; nri++) {
-        LOGi("Benchmark prompt processing (pp)");
-
-        common_batch_clear(*batch);
-
-        const int n_tokens = pp;
-        for (i = 0; i < n_tokens; i++) {
-            common_batch_add(*batch, 0, i, { 0 }, false);
-        }
-
-        batch->logits[batch->n_tokens - 1] = true;
-        llama_kv_self_clear(context);
-
-        const auto t_pp_start = ggml_time_us();
-        if (llama_decode(context, *batch) != 0) {
-            LOGi("llama_decode() failed during prompt processing");
-        }
-        const auto t_pp_end = ggml_time_us();
-
-        // bench text generation
-
-        LOGi("Benchmark text generation (tg)");
-
-        llama_kv_self_clear(context);
-        const auto t_tg_start = ggml_time_us();
-        for (i = 0; i < tg; i++) {
-
-            common_batch_clear(*batch);
-            for (j = 0; j < pl; j++) {
-                common_batch_add(*batch, 0, i, { j }, true);
-            }
-
-            LOGi("llama_decode() text generation: %d", i);
-            if (llama_decode(context, *batch) != 0) {
-                LOGi("llama_decode() failed during text generation");
-            }
-        }
-
-        const auto t_tg_end = ggml_time_us();
-
-        llama_kv_self_clear(context);
-
-        const auto t_pp = double(t_pp_end - t_pp_start) / 1000000.0;
-        const auto t_tg = double(t_tg_end - t_tg_start) / 1000000.0;
-
-        const auto speed_pp = double(pp) / t_pp;
-        const auto speed_tg = double(pl * tg) / t_tg;
-
-        pp_avg += speed_pp;
-        tg_avg += speed_tg;
-
-        pp_std += speed_pp * speed_pp;
-        tg_std += speed_tg * speed_tg;
-
-        LOGi("pp %f t/s, tg %f t/s", speed_pp, speed_tg);
-    }
-
-    pp_avg /= double(nr);
-    tg_avg /= double(nr);
-
-    if (nr > 1) {
-        pp_std = sqrt(pp_std / double(nr - 1) - pp_avg * pp_avg * double(nr) / double(nr - 1));
-        tg_std = sqrt(tg_std / double(nr - 1) - tg_avg * tg_avg * double(nr) / double(nr - 1));
-    } else {
-        pp_std = 0;
-        tg_std = 0;
-    }
-
-    char model_desc[128];
-    llama_model_desc(model, model_desc, sizeof(model_desc));
-
-    const auto model_size     = double(llama_model_size(model)) / 1024.0 / 1024.0 / 1024.0;
-    const auto model_n_params = double(llama_model_n_params(model)) / 1e9;
-
-    const auto backend    = "(Android)"; // TODO: What should this be?
-
-    std::stringstream result;
-    result << std::setprecision(2);
-    result << "| model | size | params | backend | test | t/s |\n";
-    result << "| --- | --- | --- | --- | --- | --- |\n";
-    result << "| " << model_desc << " | " << model_size << "GiB | " << model_n_params << "B | " << backend << " | pp " << pp << " | " << pp_avg << " ± " << pp_std << " |\n";
-    result << "| " << model_desc << " | " << model_size << "GiB | " << model_n_params << "B | " << backend << " | tg " << tg << " | " << tg_avg << " ± " << tg_std << " |\n";
-
-    return env->NewStringUTF(result.str().c_str());
 }
 
 extern "C"
@@ -459,10 +345,8 @@ Java_android_llama_cpp_LLamaAndroid_kv_1cache_1clear(JNIEnv *, jobject, jlong co
 
 // HeteroSpec
 
-// WebSocket客户端类型定义
 typedef websocketpp::client<websocketpp::config::asio_client> ws_client;
 
-// 全局状态
 struct CloudState {
     ws_client client;
     websocketpp::connection_hdl connection;
@@ -472,8 +356,8 @@ struct CloudState {
     std::mutex mutex;
     std::condition_variable cv;
     std::vector<llama_token> prompt_tokens;
-    int n_past;
-    llama_token last_token;
+    int n_past{};
+    llama_token last_token{};
     std::thread client_thread;
     std::condition_variable connect_cv;
     bool connection_ready = false;
@@ -483,17 +367,15 @@ struct CloudState {
 bool init_websocket(CloudState& state, const std::string& url) {
     if (state.is_connected) return true;
 
-    // 完全禁用所有访问日志（除非调试需要）
+    // 优化日志开销
     state.client.clear_access_channels(websocketpp::log::alevel::all);
 
-    // 只保留最关键的连接状态日志（可选）
     state.client.set_access_channels(
             websocketpp::log::alevel::connect |
             websocketpp::log::alevel::disconnect |
             websocketpp::log::alevel::fail
     );
 
-    // 错误日志只保留严重错误
     state.client.clear_error_channels(websocketpp::log::elevel::all);
     state.client.set_error_channels(
             websocketpp::log::elevel::rerror |
@@ -503,18 +385,15 @@ bool init_websocket(CloudState& state, const std::string& url) {
     state.client.set_max_message_size(1024 * 1024);
     state.client.set_max_http_body_size(1024 * 1024);
 
-    // 优化消息处理回调
     state.client.set_message_handler([&state](websocketpp::connection_hdl hdl, ws_client::message_ptr msg) {
         try {
             const auto* data = reinterpret_cast<const uint8_t*>(msg->get_payload().data());
             const size_t size = msg->get_payload().size();
 
             if (size > 0 && data[0] == 0x01) {  // verify消息
-                // 预分配空间，避免重新分配
                 std::vector<int> tokens;
                 tokens.reserve((size - 1) / sizeof(int));
 
-                // 直接复制数据，避免逐字节处理
                 const int* token_ptr = reinterpret_cast<const int*>(data + 1);
                 const size_t num_tokens = (size - 1) / sizeof(int);
                 tokens.assign(token_ptr, token_ptr + num_tokens);
@@ -528,7 +407,6 @@ bool init_websocket(CloudState& state, const std::string& url) {
         }
     });
 
-    // 设置连接打开回调
     state.client.set_open_handler([&state](websocketpp::connection_hdl hdl) {
         std::unique_lock<std::mutex> lock(state.mutex);
         state.connection_ready = true;
@@ -556,7 +434,6 @@ bool init_websocket(CloudState& state, const std::string& url) {
         }
     });
 
-    // 等待连接建立
     {
         std::unique_lock<std::mutex> lock(state.mutex);
         if (!state.connect_cv.wait_for(lock, std::chrono::seconds(10), [&state] {
@@ -663,19 +540,6 @@ Java_android_llama_cpp_LLamaAndroid_heterospec_1init(
     }
 
     //  prefill draft model
-    auto n_ctx = llama_n_ctx(context);
-    auto n_kv_req = tokens_list.size() + n_len;
-
-    LOGi("n_len = %d, n_ctx = %d, n_kv_req = %d", n_len, n_ctx, n_kv_req);
-
-    if (n_kv_req > n_ctx) {
-        LOGe("error: n_kv_req > n_ctx, the required KV cache size is not big enough");
-    }
-
-    for (auto id : tokens_list) {
-        LOGi("token: `%s`-> %d ", common_token_to_piece(context, id).c_str(), id);
-    }
-
     common_batch_clear(*batch);
 
     // evaluate the initial prompt
@@ -699,8 +563,7 @@ Java_android_llama_cpp_LLamaAndroid_heterospec_1init(
 extern "C" JNIEXPORT jstring JNICALL
 Java_android_llama_cpp_LLamaAndroid_heterospec_1loop(
         JNIEnv *env, jobject thiz,
-        jlong context_pointer, jlong batch_pointer,
-        jlong sampler_pointer, jint n_len,
+        jlong context_pointer, jint n_len,
         jobject intvar_ncur)
 {
     // 从Java对象获取状态指针
@@ -737,7 +600,6 @@ Java_android_llama_cpp_LLamaAndroid_heterospec_1loop(
     auto end1 = std::chrono::high_resolution_clock::now();
     double draft_time = std::chrono::duration<double>(end1 - start1).count() / params_spec.n_draft;
     LOGi("Draft generation time: %.3fs, generated %d tokens", draft_time, draft_tokens.size());
-    // 2. 发送验证请求
 
     try {
         // 准备二进制消息

@@ -351,10 +351,9 @@ fun AppBar(
     var downloadingModel by remember { mutableStateOf<Downloadable?>(null) }
     var downloadProgress by remember { mutableDoubleStateOf(0.0) }
     var downloadId by remember { mutableLongStateOf(-1L) }
-    var currentModelName by remember { mutableStateOf("Hunyuan") }
+    var currentModelName by remember { mutableStateOf("Qwen") }
 
     // 用于锚定DropdownMenu
-    val menuAnchor = remember { androidx.compose.ui.geometry.Offset(0f, 0f) }
     var buttonCoords by remember { mutableStateOf<androidx.compose.ui.geometry.Rect?>(null) }
 
     // 监听下载进度

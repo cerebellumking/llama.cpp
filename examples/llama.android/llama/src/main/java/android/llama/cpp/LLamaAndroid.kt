@@ -36,7 +36,7 @@ class LLamaAndroid {
         }
     }.asCoroutineDispatcher()
 
-    private val nlen: Int = 1024
+    private val nlen: Int = 1536
     private var nativeStatePtr: Long = 0L
 
     private external fun log_to_android()
@@ -50,15 +50,6 @@ class LLamaAndroid {
     private external fun free_batch(batch: Long)
     private external fun new_sampler(): Long
     private external fun free_sampler(sampler: Long)
-    private external fun bench_model(
-        context: Long,
-        model: Long,
-        batch: Long,
-        pp: Int,
-        tg: Int,
-        pl: Int,
-        nr: Int
-    ): String
 
     private external fun system_info(): String
 
@@ -87,28 +78,15 @@ class LLamaAndroid {
         serverUrl: String,
     ): Int
 
+    private external fun heterospec_cleanup()
+
     private external fun heterospec_loop(
         context: Long,
-        batch: Long,
-        sampler: Long,
         nLen: Int,
         ncur: IntVar
     ): String?
 
     private external fun kv_cache_clear(context: Long)
-
-    suspend fun bench(pp: Int, tg: Int, pl: Int, nr: Int = 1): String {
-        return withContext(runLoop) {
-            when (val state = threadLocalState.get()) {
-                is State.Loaded -> {
-                    Log.d(tag, "bench(): $state")
-                    bench_model(state.context, state.model, state.batch, pp, tg, pl, nr)
-                }
-
-                else -> throw IllegalStateException("No model loaded")
-            }
-        }
-    }
 
     suspend fun load(pathToModel: String) {
         withContext(runLoop) {
@@ -146,8 +124,7 @@ class LLamaAndroid {
                 var totalTokens = 0
                 var curTokens = ncur.value
                 while (ncur.value <= nlen) {
-//                    val str = completion_loop(state.context, state.batch, state.sampler, nlen, ncur)
-                    val str = heterospec_loop(state.context, state.batch, state.sampler, nlen, ncur)
+                    val str = heterospec_loop(state.context, nlen, ncur)
                     if (str == null) {
                         break
                     }
@@ -191,6 +168,7 @@ class LLamaAndroid {
         withContext(runLoop) {
             when (val state = threadLocalState.get()) {
                 is State.Loaded -> {
+                    heterospec_cleanup()
                     free_context(state.context)
                     free_model(state.model)
                     free_batch(state.batch)

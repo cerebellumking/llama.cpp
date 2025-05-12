@@ -170,31 +170,6 @@ class MainViewModel(
         }
     }
 
-    fun bench(pp: Int, tg: Int, pl: Int, nr: Int = 1) {
-        viewModelScope.launch {
-            try {
-                val start = System.nanoTime()
-                val warmupResult = llamaAndroid.bench(pp, tg, pl, nr)
-                val end = System.nanoTime()
-
-                messages += ChatMessage(warmupResult, MessageType.SYSTEM)
-
-                val warmup = (end - start).toDouble() / NanosPerSecond
-                messages += ChatMessage("Warm up time: $warmup seconds, please wait...", MessageType.SYSTEM)
-
-                if (warmup > 5.0) {
-                    messages += ChatMessage("Warm up took too long, aborting benchmark", MessageType.SYSTEM)
-                    return@launch
-                }
-
-                messages += ChatMessage(llamaAndroid.bench(512, 128, 1, 3), MessageType.SYSTEM)
-            } catch (exc: IllegalStateException) {
-                Log.e(tag, "bench() failed", exc)
-                messages += ChatMessage(exc.message!!, MessageType.SYSTEM)
-            }
-        }
-    }
-
     fun load(pathToModel: String, isHetero: Boolean = false) {
         viewModelScope.launch {
             try {
