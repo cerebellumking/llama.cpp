@@ -53,6 +53,7 @@ import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.unit.DpOffset
 import androidx.compose.ui.platform.LocalDensity
+import dev.jeziellago.compose.markdowntext.MarkdownText
 
 class MainActivity(
     activityManager: ActivityManager? = null,
@@ -112,8 +113,8 @@ class MainActivity(
             // 创建输出图片
             val outputBitmap = Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ARGB_8888)
 
-            // 调用OCR引擎，maxSideLen自适应图片分辨率，最大不超过2048
-            val maxSideLen = minOf(maxOf(bitmap.width, bitmap.height), 2048)
+            // 调用OCR引擎，maxSideLen自适应图片分辨率
+            val maxSideLen = minOf(maxOf(bitmap.width, bitmap.height), 4096)
             val result = ocrEngine.detect(bitmap, outputBitmap, maxSideLen)
             val allText = result.strRes
 
@@ -685,13 +686,22 @@ fun MessageItem(content: String, isUserInput: Boolean, image: Bitmap? = null) {
                 }
             }
         } else {
-            // 系统输出使用普通文本样式
-            Text(
-                text = content,
-                color = Color.Black,
-                fontSize = 16.sp,
-                modifier = Modifier.padding(horizontal = 16.dp)
-            )
+            // 系统输出使用 Markdown 渲染
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp)
+            ) {
+                MarkdownText(
+                    markdown = content,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 4.dp),
+                    style = MaterialTheme.typography.bodyLarge.copy(
+                        color = Color.Black
+                    )
+                )
+            }
         }
     }
 
