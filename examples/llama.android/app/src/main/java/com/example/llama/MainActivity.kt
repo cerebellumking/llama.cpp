@@ -33,6 +33,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.text.font.FontWeight
@@ -57,6 +58,47 @@ import dev.jeziellago.compose.markdowntext.MarkdownText
 import androidx.compose.runtime.snapshotFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.isActive
+
+// 优化的配色方案
+object AppColors {
+    // 主色调 - 优雅的蓝色系
+    val Primary = Color(0xFF2B7DE9)
+    val PrimaryDark = Color(0xFF1B5FC7)
+    val PrimaryLight = Color(0xFF4A90FF)
+    
+    // 背景色 - 现代化渐变
+    val Background = Color(0xFFF7F9FC)
+    val BackgroundSecondary = Color(0xFFFFFFFF)
+    val BackgroundDark = Color(0xFF0F1419)
+    
+    // 聊天气泡
+    val UserBubble = Color(0xFF2B7DE9)
+    val AIBubble = Color(0xFFFFFFFF)
+    val AIBubbleBorder = Color(0xFFE8ECF1)
+    
+    // 文本颜色
+    val TextPrimary = Color(0xFF1A1A1A)
+    val TextSecondary = Color(0xFF6B7280)
+    val TextWhite = Color(0xFFFFFFFF)
+    val TextMuted = Color(0xFF9CA3AF)
+    
+    // 输入框
+    val InputBackground = Color(0xFFFFFFFF)
+    val InputBorder = Color(0xFFE5E7EB)
+    val InputBorderFocused = Color(0xFF2B7DE9)
+    
+    // 应用栏 - 优雅的渐变蓝色
+    val AppBarBackground = Color(0xFF2B7DE9)
+    val AppBarBackgroundSecondary = Color(0xFF4A90FF)
+    val StatusBarBackground = Color(0xFFFFFFFF)
+    val StatusBarBackgroundDark = Color(0xFF1A1A1A)
+    
+    // 分割线
+    val Divider = Color(0xFFE5E7EB)
+    
+    // 阴影
+    val Shadow = Color(0x0A000000)
+}
 
 class MainActivity(
     activityManager: ActivityManager? = null,
@@ -261,7 +303,7 @@ class MainActivity(
             LlamaAndroidTheme {
                 Surface(
                     modifier = Modifier.fillMaxSize(),
-                    color = MaterialTheme.colorScheme.background
+                    color = AppColors.Background
                 ) {
                     MainCompose(
                         viewModel,
@@ -287,7 +329,7 @@ fun MainCompose(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(Color(0xFF1A1A1A))
+            .background(AppColors.Background)
     ) {
         // 应用栏
         AppBar(models, viewModel, dm)
@@ -297,15 +339,35 @@ fun MainCompose(
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .background(Color(0xFF2C2C2C))
-                    .padding(8.dp),
+                    .background(
+                        brush = Brush.horizontalGradient(
+                            colors = listOf(
+                                AppColors.Primary.copy(alpha = 0.12f),
+                                AppColors.PrimaryLight.copy(alpha = 0.08f)
+                            )
+                        )
+                    )
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
                 contentAlignment = Alignment.Center
             ) {
-                Text(
-                    text = "推理速度: %.1f tokens/s".format(viewModel.inferenceSpeed),
-                    color = Color.White,
-                    fontSize = 14.sp
-                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Speed,
+                        contentDescription = "推理速度",
+                        tint = AppColors.Primary,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "推理速度: %.1f tokens/s".format(viewModel.inferenceSpeed),
+                        color = AppColors.Primary,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
             }
         }
 
@@ -314,7 +376,7 @@ fun MainCompose(
             modifier = Modifier
                 .weight(1f)
                 .fillMaxWidth()
-                .background(Color.White)
+                .background(AppColors.Background)
         ) {
             val scrollState = rememberLazyListState()
 
@@ -334,7 +396,9 @@ fun MainCompose(
                 state = scrollState,
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(horizontal = 16.dp)
+                    .padding(horizontal = 16.dp),
+                contentPadding = PaddingValues(vertical = 16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 items(viewModel.messages) { chatMessage ->
                     MessageItem(
@@ -401,215 +465,236 @@ fun AppBar(
         }
     }
 
-    Surface(color = Color(0xFF6200EE)) {
-        Box(Modifier.fillMaxWidth().height(56.dp)) {
-            val density = LocalDensity.current
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.align(Alignment.Center)
-            ) {
-                Text(
-                    text = "HeteroSpec",
-                    color = Color.White,
-                    fontSize = 20.sp,
-                    fontWeight = FontWeight.Bold,
-                    modifier = Modifier.padding(start = 24.dp)
+    // 应用栏 - 使用渐变背景
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(64.dp)
+            .background(
+                brush = Brush.horizontalGradient(
+                    colors = listOf(
+                        AppColors.AppBarBackground,
+                        AppColors.AppBarBackgroundSecondary
+                    )
                 )
-                Spacer(modifier = Modifier.width(8.dp))
-                // 下拉按钮
-                Box {
-                    IconButton(
-                        onClick = { showMenu = true },
-                        modifier = Modifier
-                            .size(28.dp)
-                            .padding(top = 8.dp)
-                            .offset(x = (-8).dp)
-                            .onGloballyPositioned { coords ->
-                                buttonCoords = coords.boundsInWindow()
+            )
+    ) {
+        val density = LocalDensity.current
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier
+                .align(Alignment.Center)
+                .padding(horizontal = 16.dp)
+        ) {
+            Text(
+                text = "HeteroSpec",
+                color = AppColors.TextWhite,
+                fontSize = 22.sp,
+                fontWeight = FontWeight.Bold
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+            // 下拉按钮
+            Box {
+                IconButton(
+                    onClick = { showMenu = true },
+                    modifier = Modifier
+                        .size(32.dp)
+                        .onGloballyPositioned { coords ->
+                            buttonCoords = coords.boundsInWindow()
+                        }
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.ArrowDropDown,
+                        contentDescription = "选择模型",
+                        tint = AppColors.TextWhite
+                    )
+                }
+                DropdownMenu(
+                    expanded = showMenu,
+                    onDismissRequest = { showMenu = false },
+                    offset = buttonCoords?.let {
+                        DpOffset((-220).dp, with(density) { it.height.toDp() - 35.dp })
+                    } ?: DpOffset((-220).dp, (-35).dp),
+                    modifier = Modifier
+                        .background(AppColors.BackgroundSecondary)
+                        .width(320.dp)
+                ) {
+                    // API模型分组
+                    Text(
+                        text = "API模型",
+                        color = AppColors.TextPrimary,
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                    )
+                    Divider(color = AppColors.Divider)
+                    models.filter { it.isApiModel }.forEach { model ->
+                        DropdownMenuItem(
+                            text = { 
+                                Text(
+                                    model.name, 
+                                    color = AppColors.TextPrimary,
+                                    fontSize = 14.sp
+                                ) 
+                            },
+                            onClick = {
+                                viewModel.clear()
+                                viewModel.switchToApiMode(
+                                    when (model.name) {
+                                        "DeepSeek API" -> ApiType.DEEPSEEK
+                                        "Qwen2.5-32B API" -> ApiType.QWEN
+                                        else -> ApiType.DEEPSEEK
+                                    }
+                                )
+                                currentModelName = model.name
+                                showMenu = false
+                            },
+                            trailingIcon = {
+                                if (currentModelName == model.name) {
+                                    Icon(
+                                        Icons.Default.Check,
+                                        contentDescription = "已选择",
+                                        tint = AppColors.Primary
+                                    )
+                                }
                             }
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.ArrowDropDown,
-                            contentDescription = "选择模型",
-                            tint = Color.White
                         )
                     }
-                    DropdownMenu(
-                        expanded = showMenu,
-                        onDismissRequest = { showMenu = false },
-                        offset = buttonCoords?.let {
-                            DpOffset((-220).dp, with(density) { it.height.toDp() - 35.dp })
-                        } ?: DpOffset((-220).dp, (-35).dp),
-                        modifier = Modifier
-                            .background(Color(0xFFF9F9F9))
-                            .width(320.dp)
-                    ) {
-                        // API模型分组
-                        Text(
-                            text = "API模型",
-                            color = Color.Black,
-                            fontSize = 16.sp,
-                            fontWeight = FontWeight.Bold,
-                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
-                        )
-                        Divider(color = Color.Gray.copy(alpha = 0.5f))
-                        models.filter { it.isApiModel }.forEach { model ->
-                            DropdownMenuItem(
-                                text = { Text(model.name, color = Color.Black) },
-                                onClick = {
-                                    viewModel.clear()
-                                    viewModel.switchToApiMode(
-                                        when (model.name) {
-                                            "DeepSeek API" -> ApiType.DEEPSEEK
-                                            "Qwen2.5-32B API" -> ApiType.QWEN
-                                            else -> ApiType.DEEPSEEK
-                                        }
+                    // 本地模型分组
+                    Divider(color = AppColors.Divider)
+                    Text(
+                        text = "本地模型",
+                        color = AppColors.TextPrimary,
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                    )
+                    Divider(color = AppColors.Divider)
+                    models.filter { !it.isApiModel and !it.isHetero }.forEach { model ->
+                        DropdownMenuItem(
+                            text = {
+                                Column {
+                                    Text(
+                                        model.name, 
+                                        color = AppColors.TextPrimary,
+                                        fontSize = 14.sp
                                     )
-                                    currentModelName = model.name
-                                    showMenu = false
-                                },
-                                trailingIcon = {
-                                    if (currentModelName == model.name) {
-                                        Icon(
-                                            Icons.Default.Check,
-                                            contentDescription = "已选择",
-                                            tint = Color.Black
+                                    if (downloadingModel == model) {
+                                        LinearProgressIndicator(
+                                            progress = downloadProgress.toFloat(),
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(top = 8.dp),
+                                            color = AppColors.Primary,
+                                            trackColor = AppColors.Divider
+                                        )
+                                        Text(
+                                            text = "${(downloadProgress * 100).toInt()}%",
+                                            color = AppColors.TextSecondary,
+                                            fontSize = 12.sp,
+                                            modifier = Modifier.padding(top = 4.dp)
                                         )
                                     }
                                 }
-                            )
-                        }
-                        // 本地模型分组
-                        Divider(color = Color.Gray.copy(alpha = 0.5f))
-                        Text(
-                            text = "本地模型",
-                            color = Color.Black,
-                            fontSize = 16.sp,
-                            fontWeight = FontWeight.Bold,
-                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
-                        )
-                        Divider(color = Color.Gray.copy(alpha = 0.5f))
-                        models.filter { !it.isApiModel and !it.isHetero }.forEach { model ->
-                            DropdownMenuItem(
-                                text = {
-                                    Column {
-                                        Text(model.name, color = Color.Black)
-                                        if (downloadingModel == model) {
-                                            LinearProgressIndicator(
-                                                progress = downloadProgress.toFloat(),
-                                                modifier = Modifier
-                                                    .fillMaxWidth()
-                                                    .padding(top = 8.dp),
-                                                color = Color(0xFF6200EE),
-                                                trackColor = Color.Gray
-                                            )
-                                            Text(
-                                                text = "${(downloadProgress * 100).toInt()}%",
-                                                color = Color.Black,
-                                                fontSize = 12.sp,
-                                                modifier = Modifier.padding(top = 4.dp)
-                                            )
-                                        }
-                                    }
-                                },
-                                onClick = {
-                                    if (downloadingModel == null) {
-                                        if (model.destination?.exists() == true) {
-                                            viewModel.clear() // 清除之前的对话
-                                            viewModel.load(model.destination.path)
-                                            currentModelName = model.name
-                                            showMenu = false
-                                        } else {
-                                            val request = DownloadManager.Request(model.source!!)
-                                                .setTitle(model.name)
-                                                .setDescription("正在下载模型...")
-                                                .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-                                                .setDestinationUri(model.destination!!.toUri())
-                                            downloadId = dm.enqueue(request)
-                                            downloadingModel = model
-                                            viewModel.log("开始下载模型：${model.name}")
-                                        }
-                                    }
-                                },
-                                enabled = downloadingModel == null,
-                                trailingIcon = {
-                                    if (currentModelName == model.name) {
-                                        Icon(
-                                            Icons.Default.Check,
-                                            contentDescription = "已选择",
-                                            tint = Color.Black
-                                        )
+                            },
+                            onClick = {
+                                if (downloadingModel == null) {
+                                    if (model.destination?.exists() == true) {
+                                        viewModel.clear() // 清除之前的对话
+                                        viewModel.load(model.destination.path)
+                                        currentModelName = model.name
+                                        showMenu = false
+                                    } else {
+                                        val request = DownloadManager.Request(model.source!!)
+                                            .setTitle(model.name)
+                                            .setDescription("正在下载模型...")
+                                            .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+                                            .setDestinationUri(model.destination!!.toUri())
+                                        downloadId = dm.enqueue(request)
+                                        downloadingModel = model
+                                        viewModel.log("开始下载模型：${model.name}")
                                     }
                                 }
-                            )
-                            if (models.indexOf(model) < models.filter { !it.isApiModel }.size - 1) {
-                                Divider(color = Color.Gray.copy(alpha = 0.5f))
+                            },
+                            enabled = downloadingModel == null,
+                            trailingIcon = {
+                                if (currentModelName == model.name) {
+                                    Icon(
+                                        Icons.Default.Check,
+                                        contentDescription = "已选择",
+                                        tint = AppColors.Primary
+                                    )
+                                }
                             }
-                        }
-                        // 推测解码
-                        Divider(color = Color.Gray.copy(alpha = 0.5f))
-                        Text(
-                            text = "推测解码",
-                            color = Color.Black,
-                            fontSize = 16.sp,
-                            fontWeight = FontWeight.Bold,
-                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
                         )
-                        Divider(color = Color.Gray.copy(alpha = 0.5f))
-                        models.filter { it.isHetero }.forEach { model ->
-                            DropdownMenuItem(
-                                text = {
-                                    Column {
-                                        Text(model.name, color = Color.Black)
-                                        if (downloadingModel == model) {
-                                            LinearProgressIndicator(
-                                                progress = downloadProgress.toFloat(),
-                                                modifier = Modifier
-                                                    .fillMaxWidth()
-                                                    .padding(top = 8.dp),
-                                                color = Color(0xFF6200EE),
-                                                trackColor = Color.Gray
-                                            )
-                                            Text(
-                                                text = "${(downloadProgress * 100).toInt()}%",
-                                                color = Color.Black,
-                                                fontSize = 12.sp,
-                                                modifier = Modifier.padding(top = 4.dp)
-                                            )
-                                        }
-                                    }
-                                },
-                                onClick = {
-                                    if (downloadingModel == null) {
-                                        if (model.destination?.exists() == true) {
-                                            viewModel.clear() // 清除之前的对话
-                                            viewModel.load(model.destination.path, true)
-                                            currentModelName = model.name
-                                            showMenu = false
-                                        } else {
-                                            val request = DownloadManager.Request(model.source!!)
-                                                .setTitle(model.name)
-                                                .setDescription("正在下载模型...")
-                                                .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-                                                .setDestinationUri(model.destination!!.toUri())
-                                            downloadId = dm.enqueue(request)
-                                            downloadingModel = model
-                                            viewModel.log("开始下载草稿模型：${model.name}")
-                                        }
-                                    }
-                                },
-                                enabled = downloadingModel == null,
-                                trailingIcon = {
-                                    if (currentModelName == model.name) {
-                                        Icon(
-                                            Icons.Default.Check,
-                                            contentDescription = "已选择",
-                                            tint = Color.Black
+                    }
+                    // 推测解码
+                    Divider(color = AppColors.Divider)
+                    Text(
+                        text = "推测解码",
+                        color = AppColors.TextPrimary,
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                    )
+                    Divider(color = AppColors.Divider)
+                    models.filter { it.isHetero }.forEach { model ->
+                        DropdownMenuItem(
+                            text = {
+                                Column {
+                                    Text(
+                                        model.name, 
+                                        color = AppColors.TextPrimary,
+                                        fontSize = 14.sp
+                                    )
+                                    if (downloadingModel == model) {
+                                        LinearProgressIndicator(
+                                            progress = downloadProgress.toFloat(),
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(top = 8.dp),
+                                            color = AppColors.Primary,
+                                            trackColor = AppColors.Divider
+                                        )
+                                        Text(
+                                            text = "${(downloadProgress * 100).toInt()}%",
+                                            color = AppColors.TextSecondary,
+                                            fontSize = 12.sp,
+                                            modifier = Modifier.padding(top = 4.dp)
                                         )
                                     }
                                 }
-                            )
-                        }
+                            },
+                            onClick = {
+                                if (downloadingModel == null) {
+                                    if (model.destination?.exists() == true) {
+                                        viewModel.clear() // 清除之前的对话
+                                        viewModel.load(model.destination.path, true)
+                                        currentModelName = model.name
+                                        showMenu = false
+                                    } else {
+                                        val request = DownloadManager.Request(model.source!!)
+                                            .setTitle(model.name)
+                                            .setDescription("正在下载模型...")
+                                            .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+                                            .setDestinationUri(model.destination!!.toUri())
+                                        downloadId = dm.enqueue(request)
+                                        downloadingModel = model
+                                        viewModel.log("开始下载草稿模型：${model.name}")
+                                    }
+                                }
+                            },
+                            enabled = downloadingModel == null,
+                            trailingIcon = {
+                                if (currentModelName == model.name) {
+                                    Icon(
+                                        Icons.Default.Check,
+                                        contentDescription = "已选择",
+                                        tint = AppColors.Primary
+                                    )
+                                }
+                            }
+                        )
                     }
                 }
             }
@@ -659,62 +744,71 @@ fun MessageItem(content: String, isUserInput: Boolean, image: Bitmap? = null) {
     var showImageViewer by remember { mutableStateOf(false) }
 
     Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 4.dp),
+        modifier = Modifier.fillMaxWidth(),
         horizontalAlignment = if (isUserInput) Alignment.End else Alignment.Start
     ) {
         if (isUserInput) {
-            // 用户输入使用对话框样式
-            Box(
-                modifier = Modifier
-                    .widthIn(max = 280.dp)
-                    .clip(
-                        RoundedCornerShape(
-                            topStart = 16.dp,
-                            topEnd = 16.dp,
-                            bottomStart = 16.dp,
-                            bottomEnd = 4.dp
-                        )
-                    )
-                    .background(Color(0xFF6200EE))
-                    .padding(12.dp)
-            ) {
-                if (image != null) {
-                    // 如果有图片，显示图片并添加点击事件
+            if (image != null) {
+                // 图片消息 - 直接使用背景色
+                Box(
+                    modifier = Modifier
+                        .widthIn(max = 280.dp)
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(AppColors.Background)
+                        .clickable { showImageViewer = true }
+                        .padding(8.dp)
+                ) {
                     Image(
                         bitmap = image.asImageBitmap(),
                         contentDescription = "User image",
                         modifier = Modifier
                             .fillMaxWidth()
                             .heightIn(max = 200.dp)
-                            .clickable { showImageViewer = true },
+                            .clip(RoundedCornerShape(12.dp)),
                         contentScale = ContentScale.Fit
                     )
-                } else {
-                    // 如果没有图片，显示文本
+                }
+            } else {
+                // 文本消息 - 使用蓝色背景
+                Box(
+                    modifier = Modifier
+                        .widthIn(max = 280.dp)
+                        .clip(
+                            RoundedCornerShape(
+                                topStart = 20.dp,
+                                topEnd = 20.dp,
+                                bottomStart = 20.dp,
+                                bottomEnd = 4.dp
+                            )
+                        )
+                        .background(AppColors.UserBubble)
+                        .padding(16.dp)
+                ) {
                     Text(
                         text = content,
-                        color = Color.White,
-                        fontSize = 16.sp
+                        color = AppColors.TextWhite,
+                        fontSize = 16.sp,
+                        lineHeight = 22.sp
                     )
                 }
             }
         } else {
-            // 系统输出使用 Markdown 渲染
+            // AI回复气泡 - 简洁边框设计
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 16.dp)
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(AppColors.AIBubble)
+                    .padding(12.dp)
             ) {
                 val markdownContent = remember(content) { content }
                 MarkdownText(
                     markdown = markdownContent,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 4.dp),
+                    modifier = Modifier.fillMaxWidth(),
                     style = MaterialTheme.typography.bodyLarge.copy(
-                        color = Color.Black
+                        color = AppColors.TextPrimary,
+                        fontSize = 16.sp,
+                        lineHeight = 24.sp
                     )
                 )
             }
@@ -737,52 +831,103 @@ fun InputArea(
     onCamera: () -> Unit,
     activity: MainActivity
 ) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(Color.White)
-            .padding(8.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        // 相机按钮
-        IconButton(onClick = onCamera) {
-            Icon(
-                imageVector = Icons.Default.Camera,
-                contentDescription = "Take Photo",
-                tint = Color(0xFF6200EE)
-            )
-        }
-
-        // 相册按钮
-        IconButton(onClick = { activity.pickImage() }) {
-            Icon(
-                imageVector = Icons.Default.Image,
-                contentDescription = "Pick Image",
-                tint = Color(0xFF6200EE)
-            )
-        }
-
-        OutlinedTextField(
-            value = viewModel.message,
-            onValueChange = { viewModel.updateMessage(it) },
-            modifier = Modifier
-                .weight(1f)
-                .padding(horizontal = 8.dp),
-            placeholder = { Text("输入消息...") },
-            shape = RoundedCornerShape(24.dp),
-            colors = OutlinedTextFieldDefaults.colors(
-                focusedBorderColor = Color(0xFF6200EE),
-                unfocusedBorderColor = Color(0xFFE0E0E0)
-            )
+    Column {
+        // 分割线
+        Divider(
+            color = AppColors.Divider,
+            thickness = 1.dp
         )
-
-        Button(
-            onClick = onSend,
-            colors = ButtonDefaults.buttonColors(
-                containerColor = Color(0xFF6200EE)
-            )
+        
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(AppColors.BackgroundSecondary)
+                .padding(16.dp),
+            verticalAlignment = Alignment.Bottom
         ) {
-            Text("发送")
+            // 相机按钮
+            IconButton(
+                onClick = onCamera,
+                modifier = Modifier
+                    .size(40.dp)
+                    .clip(RoundedCornerShape(20.dp))
+                    .background(AppColors.Background)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Camera,
+                    contentDescription = "Take Photo",
+                    tint = AppColors.Primary,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+
+            Spacer(modifier = Modifier.width(8.dp))
+
+            // 相册按钮
+            IconButton(
+                onClick = { activity.pickImage() },
+                modifier = Modifier
+                    .size(40.dp)
+                    .clip(RoundedCornerShape(20.dp))
+                    .background(AppColors.Background)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Image,
+                    contentDescription = "Pick Image",
+                    tint = AppColors.Primary,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+
+            Spacer(modifier = Modifier.width(12.dp))
+
+            // 输入框
+            OutlinedTextField(
+                value = viewModel.message,
+                onValueChange = { viewModel.updateMessage(it) },
+                modifier = Modifier
+                    .weight(1f)
+                    .clip(RoundedCornerShape(24.dp)),
+                placeholder = { 
+                    Text(
+                        "输入消息...",
+                        color = AppColors.TextMuted,
+                        fontSize = 16.sp
+                    ) 
+                },
+                shape = RoundedCornerShape(24.dp),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedBorderColor = AppColors.InputBorderFocused,
+                    unfocusedBorderColor = AppColors.InputBorder,
+                    focusedContainerColor = AppColors.InputBackground,
+                    unfocusedContainerColor = AppColors.InputBackground,
+                    focusedTextColor = AppColors.TextPrimary,
+                    unfocusedTextColor = AppColors.TextPrimary
+                ),
+                maxLines = 4
+            )
+
+            Spacer(modifier = Modifier.width(12.dp))
+
+            // 发送按钮
+            Button(
+                onClick = onSend,
+                modifier = Modifier
+                    .height(56.dp)
+                    .clip(RoundedCornerShape(28.dp)),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = AppColors.Primary,
+                    disabledContainerColor = AppColors.TextMuted
+                ),
+                contentPadding = PaddingValues(horizontal = 24.dp)
+            ) {
+                Text(
+                    "发送",
+                    color = AppColors.TextWhite,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Medium
+                )
+            }
         }
     }
 }
