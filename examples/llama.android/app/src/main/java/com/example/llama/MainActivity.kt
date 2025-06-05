@@ -63,41 +63,33 @@ import kotlinx.coroutines.isActive
 object AppColors {
     // 主色调 - 优雅的蓝色系
     val Primary = Color(0xFF2B7DE9)
-    val PrimaryDark = Color(0xFF1B5FC7)
     val PrimaryLight = Color(0xFF4A90FF)
-    
+
     // 背景色 - 现代化渐变
     val Background = Color(0xFFF7F9FC)
     val BackgroundSecondary = Color(0xFFFFFFFF)
-    val BackgroundDark = Color(0xFF0F1419)
-    
+
     // 聊天气泡
     val UserBubble = Color(0xFF2B7DE9)
     val AIBubble = Color(0xFFFFFFFF)
-    val AIBubbleBorder = Color(0xFFE8ECF1)
-    
+
     // 文本颜色
     val TextPrimary = Color(0xFF1A1A1A)
     val TextSecondary = Color(0xFF6B7280)
     val TextWhite = Color(0xFFFFFFFF)
     val TextMuted = Color(0xFF9CA3AF)
-    
+
     // 输入框
     val InputBackground = Color(0xFFFFFFFF)
     val InputBorder = Color(0xFFE5E7EB)
     val InputBorderFocused = Color(0xFF2B7DE9)
-    
+
     // 应用栏 - 优雅的渐变蓝色
     val AppBarBackground = Color(0xFF2B7DE9)
     val AppBarBackgroundSecondary = Color(0xFF4A90FF)
-    val StatusBarBackground = Color(0xFFFFFFFF)
-    val StatusBarBackgroundDark = Color(0xFF1A1A1A)
-    
+
     // 分割线
     val Divider = Color(0xFFE5E7EB)
-    
-    // 阴影
-    val Shadow = Color(0x0A000000)
 }
 
 class MainActivity(
@@ -530,12 +522,12 @@ fun AppBar(
                     Divider(color = AppColors.Divider)
                     models.filter { it.isApiModel }.forEach { model ->
                         DropdownMenuItem(
-                            text = { 
+                            text = {
                                 Text(
-                                    model.name, 
+                                    model.name,
                                     color = AppColors.TextPrimary,
                                     fontSize = 14.sp
-                                ) 
+                                )
                             },
                             onClick = {
                                 viewModel.clear()
@@ -575,7 +567,7 @@ fun AppBar(
                             text = {
                                 Column {
                                     Text(
-                                        model.name, 
+                                        model.name,
                                         color = AppColors.TextPrimary,
                                         fontSize = 14.sp
                                     )
@@ -643,7 +635,7 @@ fun AppBar(
                             text = {
                                 Column {
                                     Text(
-                                        model.name, 
+                                        model.name,
                                         color = AppColors.TextPrimary,
                                         fontSize = 14.sp
                                     )
@@ -801,16 +793,107 @@ fun MessageItem(content: String, isUserInput: Boolean, image: Bitmap? = null) {
                     .background(AppColors.AIBubble)
                     .padding(12.dp)
             ) {
-                val markdownContent = remember(content) { content }
-                MarkdownText(
-                    markdown = markdownContent,
-                    modifier = Modifier.fillMaxWidth(),
-                    style = MaterialTheme.typography.bodyLarge.copy(
-                        color = AppColors.TextPrimary,
-                        fontSize = 16.sp,
-                        lineHeight = 24.sp
+                val thinkEndIndex = content.lowercase().indexOf("</think>")
+                val hasThinkContent = thinkEndIndex != -1
+
+                if (hasThinkContent) {
+                    val thinkStartIndex = content.lowercase().indexOf("<think>")
+                    val thinkContent = if (thinkStartIndex != -1) {
+                        content.substring(thinkStartIndex + 7, thinkEndIndex).trim()
+                    } else {
+                        content.substring(0, thinkEndIndex).trim()
+                    }
+                    val replyContent = content.substring(thinkEndIndex + 8).trim()
+
+                    var showThinking by remember { mutableStateOf(false) }
+
+                    Column {
+                        if (thinkContent.isNotEmpty()) {
+                            Card(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { showThinking = !showThinking },
+                                colors = CardDefaults.cardColors(
+                                    containerColor = AppColors.Background
+                                ),
+                                shape = RoundedCornerShape(8.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(12.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Icon(
+                                        imageVector = if (showThinking) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                                        contentDescription = if (showThinking) "收起思考" else "展开思考",
+                                        tint = AppColors.TextSecondary,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text(
+                                        text = "思考过程",
+                                        color = AppColors.TextSecondary,
+                                        fontSize = 14.sp,
+                                        fontWeight = FontWeight.Medium
+                                    )
+                                }
+                            }
+
+                            if (showThinking) {
+                                Spacer(modifier = Modifier.height(8.dp))
+                                Card(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    colors = CardDefaults.cardColors(
+                                        containerColor = AppColors.Background.copy(alpha = 0.5f)
+                                    ),
+                                    shape = RoundedCornerShape(8.dp)
+                                ) {
+                                    MarkdownText(
+                                        markdown = thinkContent,
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(12.dp),
+                                        style = MaterialTheme.typography.bodyMedium.copy(
+                                            color = AppColors.TextSecondary,
+                                            fontSize = 14.sp,
+                                            lineHeight = 20.sp
+                                        )
+                                    )
+                                }
+                            }
+
+                            if (replyContent.isNotEmpty()) {
+                                Spacer(modifier = Modifier.height(12.dp))
+                            }
+                        }
+
+                        // 最终回复内容
+                        if (replyContent.isNotEmpty()) {
+                            MarkdownText(
+                                markdown = replyContent,
+                                modifier = Modifier.fillMaxWidth(),
+                                style = MaterialTheme.typography.bodyLarge.copy(
+                                    color = AppColors.TextPrimary,
+                                    fontSize = 16.sp,
+                                    lineHeight = 24.sp
+                                )
+                            )
+                        }
+                    }
+                } else {
+                    // 没有思考内容，正常显示
+                    val markdownContent = remember(content) { content }
+                    MarkdownText(
+                        markdown = markdownContent,
+                        modifier = Modifier.fillMaxWidth(),
+                        style = MaterialTheme.typography.bodyLarge.copy(
+                            color = AppColors.TextPrimary,
+                            fontSize = 16.sp,
+                            lineHeight = 24.sp
+                        )
                     )
-                )
+                }
             }
         }
     }
@@ -837,7 +920,7 @@ fun InputArea(
             color = AppColors.Divider,
             thickness = 1.dp
         )
-        
+
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -849,15 +932,15 @@ fun InputArea(
             IconButton(
                 onClick = onCamera,
                 modifier = Modifier
-                    .size(40.dp)
-                    .clip(RoundedCornerShape(20.dp))
+                    .size(48.dp)
+                    .clip(RoundedCornerShape(24.dp))
                     .background(AppColors.Background)
             ) {
                 Icon(
                     imageVector = Icons.Default.Camera,
                     contentDescription = "Take Photo",
                     tint = AppColors.Primary,
-                    modifier = Modifier.size(20.dp)
+                    modifier = Modifier.size(24.dp)
                 )
             }
 
@@ -867,15 +950,15 @@ fun InputArea(
             IconButton(
                 onClick = { activity.pickImage() },
                 modifier = Modifier
-                    .size(40.dp)
-                    .clip(RoundedCornerShape(20.dp))
+                    .size(48.dp)
+                    .clip(RoundedCornerShape(24.dp))
                     .background(AppColors.Background)
             ) {
                 Icon(
                     imageVector = Icons.Default.Image,
                     contentDescription = "Pick Image",
                     tint = AppColors.Primary,
-                    modifier = Modifier.size(20.dp)
+                    modifier = Modifier.size(24.dp)
                 )
             }
 
@@ -887,13 +970,14 @@ fun InputArea(
                 onValueChange = { viewModel.updateMessage(it) },
                 modifier = Modifier
                     .weight(1f)
+                    .heightIn(min = 48.dp)
                     .clip(RoundedCornerShape(24.dp)),
-                placeholder = { 
+                placeholder = {
                     Text(
                         "输入消息...",
                         color = AppColors.TextMuted,
                         fontSize = 16.sp
-                    ) 
+                    )
                 },
                 shape = RoundedCornerShape(24.dp),
                 colors = OutlinedTextFieldDefaults.colors(
@@ -909,17 +993,16 @@ fun InputArea(
 
             Spacer(modifier = Modifier.width(12.dp))
 
-            // 发送按钮
             Button(
                 onClick = onSend,
                 modifier = Modifier
-                    .height(56.dp)
-                    .clip(RoundedCornerShape(28.dp)),
+                    .height(48.dp)
+                    .clip(RoundedCornerShape(24.dp)),
                 colors = ButtonDefaults.buttonColors(
                     containerColor = AppColors.Primary,
                     disabledContainerColor = AppColors.TextMuted
                 ),
-                contentPadding = PaddingValues(horizontal = 24.dp)
+                contentPadding = PaddingValues(horizontal = 20.dp)
             ) {
                 Text(
                     "发送",
