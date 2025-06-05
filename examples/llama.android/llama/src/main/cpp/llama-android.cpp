@@ -126,10 +126,10 @@ Java_android_llama_cpp_LLamaAndroid_new_1context(JNIEnv *env, jobject, jlong jmo
 
     llama_context_params ctx_params = llama_context_default_params();
 
-    ctx_params.n_ctx           = 4096;
+    ctx_params.n_ctx           = 2048;
     ctx_params.n_threads       = n_threads;
     ctx_params.n_threads_batch = n_threads;
-    ctx_params.n_batch        = 2048;  // 增加批处理大小
+    ctx_params.n_batch         = 1024;  // 增加批处理大小
 
     llama_context * context = llama_init_from_model(model, ctx_params);
 
@@ -361,6 +361,9 @@ struct CloudState {
     std::thread client_thread;
     std::condition_variable connect_cv;
     bool connection_ready = false;
+
+    // 添加draft time存储数组
+    std::vector<double> draft_times;
 };
 
 // 修改 WebSocket 初始化函数
@@ -436,7 +439,7 @@ bool init_websocket(CloudState& state, const std::string& url) {
 
     {
         std::unique_lock<std::mutex> lock(state.mutex);
-        if (!state.connect_cv.wait_for(lock, std::chrono::seconds(10), [&state] {
+        if (!state.connect_cv.wait_for(lock, std::chrono::seconds(15), [&state] {
             return state.connection_ready;
         })) {
             LOGe("WebSocket connection timeout");
@@ -597,9 +600,10 @@ Java_android_llama_cpp_LLamaAndroid_heterospec_1loop(
     // 生成草稿token
     auto start1 = std::chrono::high_resolution_clock::now();
     llama_tokens draft_tokens = speculative_gen_draft(spec, params_spec, prompt_tgt, id_last);
-    auto end1 = std::chrono::high_resolution_clock::now();
-    double draft_time = std::chrono::duration<double>(end1 - start1).count() / params_spec.n_draft;
-    LOGi("Draft generation time: %.3fs, generated %d tokens", draft_time, draft_tokens.size());
+//    auto end1 = std::chrono::high_resolution_clock::now();
+////    double draft_time = std::chrono::duration<double>(end1 - start1).count() / params_spec.n_draft;
+//    double draft_time = std::chrono::duration<double>(end1 - start1).count();
+//    state->draft_times.push_back(draft_time);
 
     try {
         // 准备二进制消息
@@ -611,6 +615,10 @@ Java_android_llama_cpp_LLamaAndroid_heterospec_1loop(
         const size_t data_size = draft_tokens.size() * sizeof(llama_token);
         binary_msg.resize(1 + data_size);
         memcpy(binary_msg.data() + 1, draft_tokens.data(), data_size);
+
+        auto end1 = std::chrono::high_resolution_clock::now();
+        double draft_time = std::chrono::duration<double>(end1 - start1).count();
+        state->draft_times.push_back(draft_time);
 
         auto start = std::chrono::high_resolution_clock::now();
 
@@ -627,7 +635,6 @@ Java_android_llama_cpp_LLamaAndroid_heterospec_1loop(
             auto end = std::chrono::high_resolution_clock::now();
             double verify_time = std::chrono::duration<double>(end - start).count();
             LOGi("Verification time: %.3fs", verify_time);
-
             llama_tokens final_tokens = std::move(state->accepted_tokens);
             state->prompt_tokens.insert(state->prompt_tokens.end(), state->last_token);
             state->last_token = final_tokens.back();
@@ -643,7 +650,24 @@ Java_android_llama_cpp_LLamaAndroid_heterospec_1loop(
                 const auto n_cur = env->CallIntMethod(intvar_ncur, la_int_var_value);
 
                 if (llama_vocab_is_eog(vocab, token) || n_cur >= n_len) {
-                    return nullptr;
+                    if (!state->draft_times.empty()) {
+                        double total_draft_time = 0.0;
+                        for (double time : state->draft_times) {
+                            total_draft_time += time;
+                        }
+                        double avg_draft_time = total_draft_time / state->draft_times.size();
+                        LOGi("Average draft time: %.3fs over %zu iterations", avg_draft_time, state->draft_times.size());
+                    }
+
+                    if (is_valid_utf8(cached_token_chars.c_str())) {
+                        cached_token_chars += "[eog]"; // 添加字符串形式的nullptr作为终止标志
+                        auto result = env->NewStringUTF(cached_token_chars.c_str());
+                        LOGi("Generated text: %s", cached_token_chars.c_str());
+                        cached_token_chars.clear();
+                        return result;
+                    } else {
+                        return nullptr;
+                    }
                 }
 
                 env->CallVoidMethod(intvar_ncur, la_int_var_inc);

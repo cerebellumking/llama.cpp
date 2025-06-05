@@ -54,6 +54,9 @@ import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.unit.DpOffset
 import androidx.compose.ui.platform.LocalDensity
 import dev.jeziellago.compose.markdowntext.MarkdownText
+import androidx.compose.runtime.snapshotFlow
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.isActive
 
 class MainActivity(
     activityManager: ActivityManager? = null,
@@ -314,6 +317,18 @@ fun MainCompose(
                 .background(Color.White)
         ) {
             val scrollState = rememberLazyListState()
+
+            LaunchedEffect(Unit) {
+                while (isActive) {
+                    delay(1000L)
+                    snapshotFlow {
+                        Pair(viewModel.messages.size, viewModel.messages.lastOrNull()?.content)
+                    }
+                        .collectLatest { (currentSize, _) ->
+                            scrollState.animateScrollToItem(currentSize)
+                        }
+                }
+            }
 
             LazyColumn(
                 state = scrollState,
@@ -692,8 +707,9 @@ fun MessageItem(content: String, isUserInput: Boolean, image: Bitmap? = null) {
                     .fillMaxWidth()
                     .padding(horizontal = 16.dp)
             ) {
+                val markdownContent = remember(content) { content }
                 MarkdownText(
-                    markdown = content,
+                    markdown = markdownContent,
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(vertical = 4.dp),

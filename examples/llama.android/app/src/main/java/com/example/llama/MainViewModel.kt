@@ -36,10 +36,6 @@ data class ChatMessage(
 class MainViewModel(
     private val llamaAndroid: LLamaAndroid = LLamaAndroid.instance()
 ): ViewModel() {
-    companion object {
-        @JvmStatic
-        private val NanosPerSecond = 1_000_000_000.0
-    }
 
     private val tag: String? = this::class.simpleName
 
