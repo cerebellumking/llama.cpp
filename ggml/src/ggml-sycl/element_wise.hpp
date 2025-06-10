@@ -38,6 +38,8 @@ void ggml_sycl_silu(ggml_backend_sycl_context & ctx, ggml_tensor * dst);
 
 void ggml_sycl_gelu_quick(ggml_backend_sycl_context & ctx, ggml_tensor * dst);
 
+void ggml_sycl_gelu_erf(ggml_backend_sycl_context & ctx, ggml_tensor * dst);
+
 void ggml_sycl_tanh(ggml_backend_sycl_context & ctx, ggml_tensor * dst);
 
 void ggml_sycl_relu(ggml_backend_sycl_context & ctx, ggml_tensor * dst);
@@ -66,5 +68,10 @@ void ggml_sycl_pad(ggml_backend_sycl_context & ctx, ggml_tensor * dst);
 
 void ggml_sycl_clamp(ggml_backend_sycl_context & ctx, ggml_tensor * dst);
 
+void ggml_sycl_sgn(ggml_backend_sycl_context & ctx, ggml_tensor * dst);
+
+void ggml_sycl_abs(ggml_backend_sycl_context & ctx, ggml_tensor * dst);
+
+void ggml_sycl_elu(ggml_backend_sycl_context & ctx, ggml_tensor * dst);
 #endif // GGML_SYCL_ELEMENTWISE_HPP
 

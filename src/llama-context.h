@@ -7,15 +7,18 @@
 #include "llama-adapter.h"
 
 #include "ggml-cpp.h"
+#include "ggml-opt.h"
 
 #include <map>
 #include <vector>
 
 struct llama_model;
-struct llama_kv_cache;
 
 class llama_io_read_i;
 class llama_io_write_i;
+
+struct llama_memory_i;
+struct llama_memory_state_i;
 
 struct llama_context {
     // init scheduler and compute buffers, reserve worst-case graphs
@@ -27,7 +30,12 @@ struct llama_context {
 
     void synchronize();
 
-    const llama_model & get_model() const;
+    const llama_model   & get_model()   const;
+    const llama_cparams & get_cparams() const;
+
+    ggml_backend_sched_t get_sched() const;
+
+    ggml_context * get_ctx_compute() const;
 
     uint32_t n_ctx()         const;
     uint32_t n_ctx_per_seq() const;
@@ -38,10 +46,12 @@ struct llama_context {
     uint32_t n_threads()       const;
     uint32_t n_threads_batch() const;
 
-          llama_kv_cache * get_kv_self();
-    const llama_kv_cache * get_kv_self() const;
+    llama_memory_t get_memory() const;
 
-    void kv_self_update();
+    // return true of the KV cache was updated
+    // TODO: remove
+    bool kv_self_update(bool optimize);
+    void kv_self_defrag_sched();
 
     enum llama_pooling_type pooling_type() const;
 
@@ -81,6 +91,16 @@ struct llama_context {
                 int32_t   n_embd,
                 int32_t   il_start,
                 int32_t   il_end);
+
+    // process a single ubatch with a specific graph type
+    // if memory_state is provided, it will be applied first to the context's memory
+    // ret contains the status of the graph computation
+    // returns nullptr only if ret != GGML_STATUS_SUCCESS
+    llm_graph_result_ptr process_ubatch(
+              const llama_ubatch & ubatch,
+                  llm_graph_type   gtype,
+            llama_memory_state_i * mstate,
+                     ggml_status & ret);
 
     int encode(llama_batch & inp_batch);
     int decode(llama_batch & inp_batch);
@@ -128,6 +148,32 @@ struct llama_context {
     llama_perf_context_data perf_get_data() const;
     void perf_reset();
 
+    //
+    // training
+    //
+
+    void opt_init(struct llama_model * model, struct llama_opt_params lopt_params);
+
+    void opt_epoch(
+            ggml_opt_dataset_t      dataset,
+            ggml_opt_result_t       result_train,
+            ggml_opt_result_t       result_eval,
+            int64_t                 idata_split,
+            ggml_opt_epoch_callback callback_train,
+            ggml_opt_epoch_callback callback_eval);
+
+    void opt_epoch_iter(
+            ggml_opt_dataset_t               dataset,
+            ggml_opt_result_t                result,
+            const std::vector<llama_token> & tokens,
+            const std::vector<llama_token> & labels_sparse,
+            llama_batch                    & batch,
+            ggml_opt_epoch_callback          callback,
+            bool                             train,
+            int64_t                          idata_in_loop,
+            int64_t                          ndata_in_loop,
+            int64_t                          t_loop_start);
+
 private:
     //
     // output
@@ -137,49 +183,31 @@ private:
     // Returns max number of outputs for which space was reserved.
     int32_t output_reserve(int32_t n_outputs);
 
-    // make the outputs have the same order they had in the user-provided batch
-    // TODO: maybe remove this
-    void output_reorder();
-
     //
     // graph
     //
 
+public:
     int32_t graph_max_nodes() const;
 
     // zero-out inputs and create the ctx_compute for the compute graph
     ggml_cgraph * graph_init();
 
-    llm_graph_result_ptr graph_build(
-            ggml_context * ctx,
-             ggml_cgraph * gf,
-      const llama_ubatch & ubatch,
-          llm_graph_type   gtype);
-
     // returns the result of ggml_backend_sched_graph_compute_async execution
-    ggml_status graph_compute(
-            ggml_cgraph * gf,
-                   bool   batched);
+    ggml_status graph_compute(ggml_cgraph * gf, bool batched);
+
+    // reserve a graph with a dummy ubatch of the specified size
+    ggml_cgraph * graph_reserve(uint32_t n_tokens, uint32_t n_seqs, uint32_t n_outputs, const llama_memory_state_i * mstate);
+
+private:
+    llm_graph_result_ptr graph_build(
+                    ggml_context * ctx,
+                     ggml_cgraph * gf,
+              const llama_ubatch & ubatch,
+                  llm_graph_type   gtype,
+      const llama_memory_state_i * mstate);
 
     llm_graph_cb graph_get_cb() const;
-
-    // used by kv_self_update()
-    ggml_tensor * build_rope_shift(
-        ggml_context * ctx0,
-        ggml_tensor * cur,
-        ggml_tensor * shift,
-        ggml_tensor * factors,
-              float   freq_base,
-              float   freq_scale,
-        ggml_backend_buffer * bbuf) const;
-
-    llm_graph_result_ptr build_kv_self_shift(
-            ggml_context * ctx0,
-            ggml_cgraph * gf) const;
-
-    llm_graph_result_ptr build_kv_self_defrag(
-            ggml_context * ctx0,
-            ggml_cgraph * gf) const;
 
     // TODO: read/write lora adapters and cvec
     size_t state_write_data(llama_io_write_i & io);
@@ -197,14 +225,13 @@ private:
     llama_cparams       cparams;
     llama_adapter_cvec  cvec;
     llama_adapter_loras loras;
-    llama_sbatch        sbatch;
 
     llama_cross cross; // TODO: tmp for handling cross-attention - need something better probably
 
-    std::unique_ptr<llama_kv_cache_unified> kv_self;
+    std::unique_ptr<llama_memory_i> memory;
 
-    // TODO: remove
-    bool logits_all = false;
+    // TODO: temporary, until the llama_kv_self_defrag() API is removed
+    bool memory_force_optimize = false;
 
     // decode output (2-dimensional array: [n_outputs][n_vocab])
     size_t  logits_size = 0; // capacity (of floats) for logits
@@ -230,6 +257,9 @@ private:
     std::vector<ggml_backend_ptr> backends;
 
     ggml_context_ptr ctx_compute;
+
+    // training
+    ggml_opt_context_t opt_ctx = nullptr;
 
     ggml_threadpool_t threadpool       = nullptr;
     ggml_threadpool_t threadpool_batch = nullptr;

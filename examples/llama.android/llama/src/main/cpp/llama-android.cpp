@@ -340,7 +340,7 @@ Java_android_llama_cpp_LLamaAndroid_completion_1loop(
 extern "C"
 JNIEXPORT void JNICALL
 Java_android_llama_cpp_LLamaAndroid_kv_1cache_1clear(JNIEnv *, jobject, jlong context) {
-    llama_kv_self_clear(reinterpret_cast<llama_context *>(context));
+    llama_memory_clear(llama_get_memory(reinterpret_cast<llama_context *>(context)), true);
 }
 
 // HeteroSpec
