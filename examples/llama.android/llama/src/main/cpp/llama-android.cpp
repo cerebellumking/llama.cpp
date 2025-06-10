@@ -9,7 +9,6 @@
 #include "speculative.h"
 #include "websocketpp/client.hpp"
 #include "websocketpp/config/asio_client.hpp"
-#include "json.hpp"
 #include <thread>
 #include <chrono>
 // Write C++ code here.
@@ -643,7 +642,7 @@ Java_android_llama_cpp_LLamaAndroid_heterospec_1loop(
 
             // 重置状态
             state->accepted_tokens.clear();
-            llama_kv_self_seq_rm(context, 0, state->n_past + 1, -1);
+            llama_memory_seq_rm(llama_get_memory(context), 0, state->n_past + 1, -1);
 
             // 处理输出
             for (const auto& token : final_tokens) {
