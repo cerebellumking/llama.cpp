@@ -26,6 +26,12 @@ enum class InferenceMode {
     HETERO   // 异构推理
 }
 
+// Prompt类枚举
+enum class PromptMode {
+    QWEN2,
+    DEEPSEEk,
+    QWEN3
+}
 // 消息数据类
 data class ChatMessage(
     val content: String,
@@ -52,6 +58,9 @@ class MainViewModel(
     // 添加推理模式状态
     var inferenceMode by mutableStateOf(InferenceMode.LOCAL)
         private set
+
+    var promptMode by mutableStateOf(PromptMode.QWEN2)
+        set
 
     // 添加API类型状态
     var currentApiType by mutableStateOf(ApiType.DEEPSEEK)
@@ -102,9 +111,25 @@ class MainViewModel(
             // 构建完整的对话历史，包含系统提示词
 
             try {
+                var fullPrompt = ""
+                when (promptMode) {
+                    PromptMode.QWEN2 -> {
+                        fullPrompt = "You are Qwen, created by Alibaba Cloud. You are a helpful assistant.\n\nUser: $text\n\nAssistant:"
+//                        fullPrompt =
+//                            "<｜begin▁of▁sentence｜>You are Qwen, created by Alibaba Cloud. You are a helpful assistant.<｜User｜>$text<｜Assistant｜><think>"
+                    }
+
+                    PromptMode.QWEN3 -> {
+                        fullPrompt = "You are Qwen, created by Alibaba Cloud. You are a helpful assistant.\n\nUser: $text\n\nAssistant:\n<think></think>"
+//                        fullPrompt =
+//                            "<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.<|im_end|>\n<|im_start|>user\n$text<|im_end|>\n<|im_start|>assistant\n"
+                    }
+                    PromptMode.DEEPSEEk -> {
+                        fullPrompt = text
+                    }
+                }
                 when (inferenceMode) {
                     InferenceMode.LOCAL -> {
-                        val fullPrompt = "You are Qwen, created by Alibaba Cloud. You are a helpful assistant.\n\nUser: $text\n\nAssistant:"
                         llamaAndroid.send(fullPrompt)
                             .catch {
                                 Log.e(tag, "send() failed", it)
@@ -116,7 +141,6 @@ class MainViewModel(
                             }
                     }
                     InferenceMode.API -> {
-                        val fullPrompt = "You are Qwen, created by Alibaba Cloud. You are a helpful assistant.\n\nUser: $text\n\nAssistant:"
                         apiService.send(fullPrompt)
                             .catch {
                                 Log.e(tag, "API send() failed", it)
@@ -128,7 +152,6 @@ class MainViewModel(
                             }
                     }
                     InferenceMode.HETERO -> {
-                        val fullPrompt = "You are Qwen, created by Alibaba Cloud. You are a helpful assistant.\n\nUser: $text\n\nAssistant:"
                         llamaAndroid.sendHetero(fullPrompt)
                             .catch {
                                 Log.e(tag, "send() failed", it)

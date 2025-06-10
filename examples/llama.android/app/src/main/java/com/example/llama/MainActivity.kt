@@ -92,6 +92,16 @@ object AppColors {
     val Divider = Color(0xFFE5E7EB)
 }
 
+private fun getPromptModeForModel(modelName: String): PromptMode {
+    return when {
+        modelName.contains("DeepSeek API") -> PromptMode.DEEPSEEk
+        modelName.contains("Qwen2.5") -> PromptMode.QWEN2
+        modelName.contains("DeepSeek-R1-DRAFT") -> PromptMode.QWEN2
+        modelName.contains("Qwen3") -> PromptMode.QWEN3
+        else -> PromptMode.QWEN2 // Default
+    }
+}
+
 class MainActivity(
     activityManager: ActivityManager? = null,
     downloadManager: DownloadManager? = null,
@@ -259,6 +269,12 @@ class MainActivity(
             ),
             Downloadable(
                 name = "Qwen2.5-32B API",
+                source = null,  // API 模型不需要下载
+                destination = null,  // API 模型不需要本地文件
+                isApiModel = true
+            ),
+            Downloadable(
+                name = "Qwen3-32B API",
                 source = null,  // API 模型不需要下载
                 destination = null,  // API 模型不需要本地文件
                 isApiModel = true
@@ -466,6 +482,7 @@ fun AppBar(
                         // 下载完成后加载模型
                         downloadingModel?.let { model ->
                             viewModel.clear() // 清除之前的对话
+                            viewModel.promptMode = getPromptModeForModel(model.name)
                             viewModel.load(model.destination!!.path, model.isHetero)
                             currentModelName = model.name
                         }
@@ -555,11 +572,12 @@ fun AppBar(
                             },
                             onClick = {
                                 viewModel.clear()
+                                viewModel.promptMode = getPromptModeForModel(model.name)
                                 viewModel.switchToApiMode(
                                     when (model.name) {
                                         "DeepSeek API" -> ApiType.DEEPSEEK
                                         "Qwen2.5-32B API" -> ApiType.QWEN
-                                        else -> ApiType.DEEPSEEK
+                                        else -> ApiType.QWEN
                                     }
                                 )
                                 currentModelName = model.name
@@ -597,12 +615,12 @@ fun AppBar(
                                     )
                                     if (downloadingModel == model) {
                                         LinearProgressIndicator(
-                                            progress = downloadProgress.toFloat(),
+                                            progress = { downloadProgress.toFloat() },
                                             modifier = Modifier
                                                 .fillMaxWidth()
                                                 .padding(top = 8.dp),
                                             color = AppColors.Primary,
-                                            trackColor = AppColors.Divider
+                                            trackColor = AppColors.Divider,
                                         )
                                         Text(
                                             text = "${(downloadProgress * 100).toInt()}%",
@@ -617,6 +635,7 @@ fun AppBar(
                                 if (downloadingModel == null) {
                                     if (model.destination?.exists() == true) {
                                         viewModel.clear() // 清除之前的对话
+                                        viewModel.promptMode = getPromptModeForModel(model.name)
                                         viewModel.load(model.destination.path)
                                         currentModelName = model.name
                                         showMenu = false
@@ -665,12 +684,12 @@ fun AppBar(
                                     )
                                     if (downloadingModel == model) {
                                         LinearProgressIndicator(
-                                            progress = downloadProgress.toFloat(),
+                                            progress = { downloadProgress.toFloat() },
                                             modifier = Modifier
                                                 .fillMaxWidth()
                                                 .padding(top = 8.dp),
                                             color = AppColors.Primary,
-                                            trackColor = AppColors.Divider
+                                            trackColor = AppColors.Divider,
                                         )
                                         Text(
                                             text = "${(downloadProgress * 100).toInt()}%",
@@ -685,6 +704,7 @@ fun AppBar(
                                 if (downloadingModel == null) {
                                     if (model.destination?.exists() == true) {
                                         viewModel.clear() // 清除之前的对话
+                                        viewModel.promptMode = getPromptModeForModel(model.name)
                                         viewModel.load(model.destination.path, true)
                                         currentModelName = model.name
                                         showMenu = false
