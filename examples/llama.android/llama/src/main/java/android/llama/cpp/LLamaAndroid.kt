@@ -36,7 +36,8 @@ class LLamaAndroid {
         }
     }.asCoroutineDispatcher()
 
-    private val nlen: Int = 64
+    private val nlen: Int = 1536
+    private var nativeStatePtr: Long = 0L
 
     private external fun log_to_android()
     private external fun load_model(filename: String): Long
@@ -49,15 +50,6 @@ class LLamaAndroid {
     private external fun free_batch(batch: Long)
     private external fun new_sampler(): Long
     private external fun free_sampler(sampler: Long)
-    private external fun bench_model(
-        context: Long,
-        model: Long,
-        batch: Long,
-        pp: Int,
-        tg: Int,
-        pl: Int,
-        nr: Int
-    ): String
 
     private external fun system_info(): String
 
@@ -77,20 +69,24 @@ class LLamaAndroid {
         ncur: IntVar
     ): String?
 
+    private external fun heterospec_init(
+        context: Long,
+        batch: Long,
+        text: String,
+        formatChat: Boolean,
+        nLen: Int,
+        serverUrl: String,
+    ): Int
+
+    private external fun heterospec_cleanup()
+
+    private external fun heterospec_loop(
+        context: Long,
+        nLen: Int,
+        ncur: IntVar
+    ): String?
+
     private external fun kv_cache_clear(context: Long)
-
-    suspend fun bench(pp: Int, tg: Int, pl: Int, nr: Int = 1): String {
-        return withContext(runLoop) {
-            when (val state = threadLocalState.get()) {
-                is State.Loaded -> {
-                    Log.d(tag, "bench(): $state")
-                    bench_model(state.context, state.model, state.batch, pp, tg, pl, nr)
-                }
-
-                else -> throw IllegalStateException("No model loaded")
-            }
-        }
-    }
 
     suspend fun load(pathToModel: String) {
         withContext(runLoop) {
@@ -102,7 +98,7 @@ class LLamaAndroid {
                     val context = new_context(model)
                     if (context == 0L) throw IllegalStateException("new_context() failed")
 
-                    val batch = new_batch(512, 0, 1)
+                    val batch = new_batch(1536, 0, 1)
                     if (batch == 0L) throw IllegalStateException("new_batch() failed")
 
                     val sampler = new_sampler()
@@ -116,16 +112,55 @@ class LLamaAndroid {
         }
     }
 
-    fun send(message: String, formatChat: Boolean = false): Flow<String> = flow {
+    fun sendHetero(message: String, formatChat: Boolean = false): Flow<Pair<String, Int>> = flow {
+        when (val state = threadLocalState.get()) {
+            is State.Loaded -> {
+                val ncur = IntVar(heterospec_init(state.context, state.batch, message, formatChat, nlen, ""))
+                if(ncur.value < 0) {
+                    Log.e(tag, "Heterospec init failed")
+                    emit(Pair("Heterospec init failed", ncur.value))
+                    return@flow
+                }
+                var totalTokens = 0
+                var curTokens = ncur.value
+                while (ncur.value <= nlen) {
+                    val str = heterospec_loop(state.context, nlen, ncur)
+                    if (str == null) {
+                        break
+                    }
+                    if (str.contains("[eog]")) {
+                        val finalText = str.replace("[eog]", "")
+                        if (finalText.isNotEmpty()) {
+                            totalTokens = ncur.value - curTokens
+                            emit(Pair(finalText, totalTokens))
+                        }
+                        break
+                    }
+
+                    totalTokens = ncur.value - curTokens
+                    curTokens = ncur.value
+                    emit(Pair(str, totalTokens))
+                }
+                kv_cache_clear(state.context)
+            }
+            else -> {}
+        }
+    }.flowOn(runLoop)
+
+    fun send(message: String, formatChat: Boolean = false): Flow<Pair<String, Int>> = flow {
         when (val state = threadLocalState.get()) {
             is State.Loaded -> {
                 val ncur = IntVar(completion_init(state.context, state.batch, message, formatChat, nlen))
+                var totalTokens = 0
+                var curTokens = ncur.value
                 while (ncur.value <= nlen) {
                     val str = completion_loop(state.context, state.batch, state.sampler, nlen, ncur)
                     if (str == null) {
                         break
                     }
-                    emit(str)
+                    totalTokens = ncur.value - curTokens
+                    curTokens = ncur.value
+                    emit(Pair(str, totalTokens))
                 }
                 kv_cache_clear(state.context)
             }
@@ -142,6 +177,7 @@ class LLamaAndroid {
         withContext(runLoop) {
             when (val state = threadLocalState.get()) {
                 is State.Loaded -> {
+                    heterospec_cleanup()
                     free_context(state.context)
                     free_model(state.model)
                     free_batch(state.batch)
