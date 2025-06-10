@@ -58,7 +58,12 @@ import dev.jeziellago.compose.markdowntext.MarkdownText
 import androidx.compose.runtime.snapshotFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.isActive
-
+import com.equationl.paddleocr4android.CpuPowerMode
+import com.equationl.paddleocr4android.OCR
+import com.equationl.paddleocr4android.OcrConfig
+import com.equationl.paddleocr4android.bean.OcrResult
+import com.equationl.paddleocr4android.callback.OcrInitCallback
+import com.equationl.paddleocr4android.callback.OcrRunCallback
 // 优化的配色方案
 object AppColors {
     // 主色调 - 优雅的蓝色系
@@ -114,7 +119,7 @@ class MainActivity(
     private val clipboardManager by lazy { clipboardManager ?: getSystemService<ClipboardManager>()!! }
 
     private val viewModel: MainViewModel by viewModels()
-    private lateinit var ocrEngine: OcrEngine
+    private lateinit var ocr: OCR
 
     private val requestPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -151,57 +156,51 @@ class MainActivity(
 
     private fun processImage(bitmap: Bitmap) {
         try {
-            // 创建临时文件保存图片
-            val tempFile = File(cacheDir, "temp_image.jpg")
-            FileOutputStream(tempFile).use { out ->
-                bitmap.compress(Bitmap.CompressFormat.JPEG, 100, out)
-            }
+            viewModel.log("开始识别文字...")
+            ocr.run(bitmap, object : OcrRunCallback {
+                override fun onSuccess(result: OcrResult) {
+                    val allText = result.simpleText
 
-            // 创建输出图片
-            val outputBitmap = Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ARGB_8888)
+                    // 清洗OCR结果
+                    val cleanedText = allText
+                        // 通用医师/医生/技师字段
+                        .replace(Regex("""\s*(?:[\u4e00-\u9fa5]{1,6})?(医师|医生|技师)[:：]?\s*[\u4e00-\u9fa5]{2,4}""")) { matchResult ->
+                            val prefix = matchResult.value.replace(Regex("""[:：]?\s*[\u4e00-\u9fa5]{2,4}$"""), "")
+                            ""
+                        }
+                        // 其他常见字段
+                        .replace(Regex("""姓名[:：]?\s*[\u4e00-\u9fa5]{2,4}"""), "")
+                        .replace(Regex("""患者[:：]?\s*[\u4e00-\u9fa5]{2,4}"""), "")
+                        // 替换身份证号
+                        .replace(Regex("\\d{17}[\\dXx]"), "")
+                        // 替换手机号
+                        .replace(Regex("1[3-9]\\d{9}"), "")
+                        // 替换住址
+                        .replace(Regex("地址[:：]?[\\u4e00-\\u9fa5A-Za-z0-9\\-]{4,}"), "")
+                        // 替换医院名
+                        .replace(Regex("[\\u4e00-\\u9fa5]{2,20}医院"), "")
+                        .replace(Regex("\\s+"), " ") // 将多个空白字符替换为单个空格
+                        .replace(Regex("[^\\p{L}\\p{N}\\p{P}\\s]"), "") // 只保留字母、数字、标点和空白字符
+                        .trim()
 
-            // 调用OCR引擎，maxSideLen自适应图片分辨率
-            val maxSideLen = minOf(maxOf(bitmap.width, bitmap.height), 4096)
-            val result = ocrEngine.detect(bitmap, outputBitmap, maxSideLen)
-            val allText = result.strRes
+                    // 输出OCR结果用于调试
+                    viewModel.log("OCR原始结果：$allText")
+                    viewModel.log("OCR清洗后结果：$cleanedText")
 
-            // 清洗OCR结果
-            var cleanedText = allText
-                // 通用医师/医生/技师字段
-                .replace(Regex("""\s*(?:[\u4e00-\u9fa5]{1,6})?(医师|医生|技师)[:：]?\s*[\u4e00-\u9fa5]{2,4}""")) { matchResult ->
-                    val prefix = matchResult.value.replace(Regex("""[:：]?\s*[\u4e00-\u9fa5]{2,4}$"""), "")
-                    ""
+                    // 先添加图片消息
+                    viewModel.addImageMessage(bitmap)
+
+                    // 直接发送OCR文本给AI，不显示在界面上
+                    viewModel.updateMessage("请解读病例报告并给出简短建议：" + cleanedText)
+                    viewModel.send()
                 }
-                // 其他常见字段
-                .replace(Regex("""姓名[:：]?\s*[\u4e00-\u9fa5]{2,4}"""), "")
-                .replace(Regex("""患者[:：]?\s*[\u4e00-\u9fa5]{2,4}"""), "")
-                // 替换身份证号
-                .replace(Regex("\\d{17}[\\dXx]"), "")
-                // 替换手机号
-                .replace(Regex("1[3-9]\\d{9}"), "")
-                // 替换住址
-                .replace(Regex("地址[:：]?[\\u4e00-\\u9fa5A-Za-z0-9\\-]{4,}"), "")
-                // 替换医院名
-                .replace(Regex("[\\u4e00-\\u9fa5]{2,20}医院"), "")
-                .replace(Regex("\\s+"), " ") // 将多个空白字符替换为单个空格
-                .replace(Regex("[^\\p{L}\\p{N}\\p{P}\\s]"), "") // 只保留字母、数字、标点和空白字符
-                .trim()
 
-            // 你可以根据实际OCR内容继续扩展正则
-
-            // 输出OCR结果用于调试
-            viewModel.log("OCR原始结果：$allText")
-            viewModel.log("OCR清洗后结果：$cleanedText")
-
-            // 先添加图片消息
-            viewModel.addImageMessage(bitmap)
-
-            // 直接发送OCR文本给AI，不显示在界面上
-            viewModel.updateMessage("请解读病例报告并给出简短建议：" + cleanedText)
-            viewModel.send()
-
+                override fun onFail(e: Throwable) {
+                    viewModel.log("文字识别失败：${e.message}")
+                }
+            })
         } catch (e: Exception) {
-            viewModel.log("文字识别失败：${e.message}")
+            viewModel.log("调用OCR失败：${e.message}")
         }
     }
 
@@ -243,7 +242,29 @@ class MainActivity(
         super.onCreate(savedInstanceState)
 
         // 初始化OCR引擎
-        ocrEngine = OcrEngine(applicationContext)
+        ocr = OCR(this)
+        val config = OcrConfig()
+        config.modelPath = "models/ch_PP-OCRv5"
+        config.labelPath = "labels/ppocr_keys_v5.txt"
+        config.isRunDet = true
+        config.isRunCls = true
+        config.isRunRec = true
+        config.clsModelFilename = "cls.nb" // cls 模型文件名
+        config.detModelFilename = "det.nb" // det 模型文件名
+        config.recModelFilename = "rec.nb" // rec 模型文件名
+        config.cpuPowerMode = CpuPowerMode.LITE_POWER_FULL
+        config.isDrwwTextPositionBox = false
+
+        viewModel.log("正在加载OCR模型...")
+        ocr.initModel(config, object : OcrInitCallback {
+            override fun onSuccess() {
+                viewModel.log("OCR模型加载成功")
+            }
+
+            override fun onFail(e: Throwable) {
+                viewModel.log("OCR模型加载失败: $e")
+            }
+        })
 
         StrictMode.setVmPolicy(
             VmPolicy.Builder(StrictMode.getVmPolicy())
@@ -347,6 +368,11 @@ class MainActivity(
                 }
             }
         }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        ocr.releaseModel()
     }
 }
 

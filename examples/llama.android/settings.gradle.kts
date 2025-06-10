@@ -17,3 +17,4 @@ dependencyResolutionManagement {
 rootProject.name = "LlamaAndroid"
 include(":app")
 include(":llama")
+include(":PaddleOCR4Android")
