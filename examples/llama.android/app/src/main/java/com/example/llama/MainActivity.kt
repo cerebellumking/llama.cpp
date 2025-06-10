@@ -276,6 +276,18 @@ class MainActivity(
                 destination = File(extFilesDir, "DeepSeek-R1-DRAFT-Qwen2.5-0.5B-f16.gguf"),
                 isApiModel = false
             ),
+            Downloadable(
+                name = "Qwen3-0.6B (Q4_0, 0.4 GiB)",
+                source = Uri.parse("https://huggingface.co/unsloth/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q4_0.gguf?download=true"),
+                destination = File(extFilesDir, "Qwen3-0.6B-Q4_0.gguf"),
+                isApiModel = false
+            ),
+            Downloadable(
+                name = "Qwen3-0.6B (FP16, 1.2GiB)",
+                source = Uri.parse("https://huggingface.co/unsloth/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-BF16.gguf?download=true"),
+                destination = File(extFilesDir, "Qwen3-0.6B-BF16.gguf"),
+                isApiModel = false
+            ),
             // 协同推理
             Downloadable(
                 name = "Qwen2.5-32B+Qwen2.5-0.5B_Q4_K_M",
@@ -287,6 +299,18 @@ class MainActivity(
                 name = "Qwen2.5-32B+Qwen2.5-0.5B",
                 source = Uri.parse("https://huggingface.co/alamios/DeepSeek-R1-DRAFT-Qwen2.5-0.5B-GGUF/resolve/main/DeepSeek-R1-DRAFT-Qwen2.5-0.5B-f16.gguf?download=true"),
                 destination = File(extFilesDir, "DeepSeek-R1-DRAFT-Qwen2.5-0.5B-f16.gguf"),
+                isHetero = true
+            ),
+            Downloadable(
+                name = "Qwen3-32B+Qwen3-0.6B_Q4_0",
+                source = Uri.parse("https://huggingface.co/unsloth/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q4_0.gguf?download=true"),
+                destination = File(extFilesDir, "Qwen3-0.6B-Q4_0.gguf"),
+                isHetero = true
+            ),
+            Downloadable(
+                name = "Qwen3-32B+Qwen3-0.6B",
+                source = Uri.parse("https://huggingface.co/unsloth/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-BF16.gguf?download=true"),
+                destination = File(extFilesDir, "Qwen3-0.6B-BF16.gguf"),
                 isHetero = true
             )
         )
@@ -519,7 +543,7 @@ fun AppBar(
                         fontWeight = FontWeight.Bold,
                         modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
                     )
-                    Divider(color = AppColors.Divider)
+                    HorizontalDivider(color = AppColors.Divider)
                     models.filter { it.isApiModel }.forEach { model ->
                         DropdownMenuItem(
                             text = {
@@ -553,7 +577,7 @@ fun AppBar(
                         )
                     }
                     // 本地模型分组
-                    Divider(color = AppColors.Divider)
+                    HorizontalDivider(color = AppColors.Divider)
                     Text(
                         text = "本地模型",
                         color = AppColors.TextPrimary,
@@ -561,7 +585,7 @@ fun AppBar(
                         fontWeight = FontWeight.Bold,
                         modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
                     )
-                    Divider(color = AppColors.Divider)
+                    HorizontalDivider(color = AppColors.Divider)
                     models.filter { !it.isApiModel and !it.isHetero }.forEach { model ->
                         DropdownMenuItem(
                             text = {
@@ -621,7 +645,7 @@ fun AppBar(
                         )
                     }
                     // 推测解码
-                    Divider(color = AppColors.Divider)
+                    HorizontalDivider(color = AppColors.Divider)
                     Text(
                         text = "推测解码",
                         color = AppColors.TextPrimary,
@@ -629,7 +653,7 @@ fun AppBar(
                         fontWeight = FontWeight.Bold,
                         modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
                     )
-                    Divider(color = AppColors.Divider)
+                    HorizontalDivider(color = AppColors.Divider)
                     models.filter { it.isHetero }.forEach { model ->
                         DropdownMenuItem(
                             text = {
@@ -916,9 +940,9 @@ fun InputArea(
 ) {
     Column {
         // 分割线
-        Divider(
-            color = AppColors.Divider,
-            thickness = 1.dp
+        HorizontalDivider(
+            thickness = 1.dp,
+            color = AppColors.Divider
         )
 
         Row(
