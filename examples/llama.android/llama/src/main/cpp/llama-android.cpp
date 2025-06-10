@@ -126,10 +126,10 @@ Java_android_llama_cpp_LLamaAndroid_new_1context(JNIEnv *env, jobject, jlong jmo
 
     llama_context_params ctx_params = llama_context_default_params();
 
-    ctx_params.n_ctx           = 2048;
+    ctx_params.n_ctx           = 3072;
     ctx_params.n_threads       = n_threads;
     ctx_params.n_threads_batch = n_threads;
-    ctx_params.n_batch         = 1024;  // 增加批处理大小
+    ctx_params.n_batch         = 1536;  // 增加批处理大小
 
     llama_context * context = llama_init_from_model(model, ctx_params);
 

@@ -98,7 +98,7 @@ class LLamaAndroid {
                     val context = new_context(model)
                     if (context == 0L) throw IllegalStateException("new_context() failed")
 
-                    val batch = new_batch(2048, 0, 1)
+                    val batch = new_batch(1536, 0, 1)
                     if (batch == 0L) throw IllegalStateException("new_batch() failed")
 
                     val sampler = new_sampler()
@@ -128,6 +128,15 @@ class LLamaAndroid {
                     if (str == null) {
                         break
                     }
+                    if (str.contains("[eog]")) {
+                        val finalText = str.replace("[eog]", "")
+                        if (finalText.isNotEmpty()) {
+                            totalTokens = ncur.value - curTokens
+                            emit(Pair(finalText, totalTokens))
+                        }
+                        break
+                    }
+
                     totalTokens = ncur.value - curTokens
                     curTokens = ncur.value
                     emit(Pair(str, totalTokens))
