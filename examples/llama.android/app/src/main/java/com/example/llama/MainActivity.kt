@@ -165,10 +165,12 @@ class MainActivity(
                     val cleanedText = allText
                         // 通用医师/医生/技师字段
                         .replace(Regex("""\s*(?:[\u4e00-\u9fa5]{1,6})?(医师|医生|技师)[:：]?\s*[\u4e00-\u9fa5]{2,4}""")) { matchResult ->
-                            val prefix = matchResult.value.replace(Regex("""[:：]?\s*[\u4e00-\u9fa5]{2,4}$"""), "")
+                            matchResult.value.replace(Regex("""[:：]?\s*[\u4e00-\u9fa5]{2,4}$"""), "")
                             ""
                         }
                         // 其他常见字段
+                        .replace(Regex("""名[:：]?\s*[\u4e00-\u9fa5]{2,4}"""), "")
+                        .replace(Regex("""号[:：]?\s*\d+"""), "")
                         .replace(Regex("""姓名[:：]?\s*[\u4e00-\u9fa5]{2,4}"""), "")
                         .replace(Regex("""患者[:：]?\s*[\u4e00-\u9fa5]{2,4}"""), "")
                         // 替换身份证号
@@ -181,6 +183,7 @@ class MainActivity(
                         .replace(Regex("[\\u4e00-\\u9fa5]{2,20}医院"), "")
                         .replace(Regex("\\s+"), " ") // 将多个空白字符替换为单个空格
                         .replace(Regex("[^\\p{L}\\p{N}\\p{P}\\s]"), "") // 只保留字母、数字、标点和空白字符
+                        .replace("姓", "")
                         .trim()
 
                     // 输出OCR结果用于调试
