@@ -56,6 +56,7 @@ dependencies {
     implementation("androidx.compose.material3:material3")
     implementation("com.squareup.okhttp3:okhttp:4.10.0")
     implementation("androidx.compose.material:material-icons-extended:1.6.1")
+    implementation("com.github.CanHub:Android-Image-Cropper:4.3.2")
     implementation(project(":llama"))
     implementation("androidx.camera:camera-core:1.3.1")
     implementation("androidx.camera:camera-camera2:1.3.1")

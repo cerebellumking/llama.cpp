@@ -65,6 +65,9 @@ import com.equationl.paddleocr4android.OcrConfig
 import com.equationl.paddleocr4android.bean.OcrResult
 import com.equationl.paddleocr4android.callback.OcrInitCallback
 import com.equationl.paddleocr4android.callback.OcrRunCallback
+import com.canhub.cropper.CropImageContract
+import com.canhub.cropper.CropImageContractOptions
+import com.canhub.cropper.CropImageOptions
 // 优化的配色方案
 object AppColors {
     // 主色调 - 优雅的蓝色系
@@ -136,7 +139,9 @@ class MainActivity(
         if (result.resultCode == RESULT_OK) {
             val imageBitmap = result.data?.extras?.get("data") as? Bitmap
             imageBitmap?.let { bitmap ->
-                processImage(bitmap)
+                // 保存为临时文件，启动裁剪
+                val uri = saveBitmapToCache(bitmap)
+                startCrop(uri)
             }
         }
     }
@@ -146,12 +151,26 @@ class MainActivity(
     ) { uri ->
         uri?.let {
             try {
-                val inputStream = contentResolver.openInputStream(uri)
-                val bitmap = BitmapFactory.decodeStream(inputStream)
-                processImage(bitmap)
+                // 直接启动裁剪
+                startCrop(uri)
             } catch (e: Exception) {
                 viewModel.log("图片处理失败：${e.message}")
             }
+        }
+    }
+
+    // 裁剪图片回调
+    private val cropImageLauncher = registerForActivityResult(CropImageContract()) { result ->
+        if (result.isSuccessful) {
+            val croppedImageUri = result.uriContent
+            croppedImageUri?.let {
+                val inputStream = contentResolver.openInputStream(it)
+                val croppedBitmap = BitmapFactory.decodeStream(inputStream)
+                croppedBitmap?.let { processImage(it) }
+            }
+        } else {
+            val exception = result.error
+            viewModel.log("裁剪失败：${exception?.message}")
         }
     }
 
@@ -241,6 +260,29 @@ class MainActivity(
         return ActivityManager.MemoryInfo().also { memoryInfo ->
             activityManager.getMemoryInfo(memoryInfo)
         }
+    }
+
+    // 启动裁剪
+    private fun startCrop(uri: Uri) {
+        val cropOptions = CropImageOptions().apply {
+            // 允许手势操作
+            allowCounterRotation = true
+            allowFlipping = true
+            allowRotation = true
+            // 裁剪框设置
+            cropShape = com.canhub.cropper.CropImageView.CropShape.RECTANGLE
+            guidelines = com.canhub.cropper.CropImageView.Guidelines.ON
+            // 自由裁剪，不固定宽高比
+            fixAspectRatio = false
+            // 显示裁剪框边角
+            showCropOverlay = true
+            // 输出设置
+            outputCompressFormat = Bitmap.CompressFormat.JPEG
+            outputCompressQuality = 90
+        }
+        
+        val cropImageContractOptions = CropImageContractOptions(uri, cropOptions)
+        cropImageLauncher.launch(cropImageContractOptions)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -378,6 +420,15 @@ class MainActivity(
     override fun onDestroy() {
         super.onDestroy()
         ocr.releaseModel()
+    }
+
+    // 保存Bitmap为临时文件，返回Uri
+    private fun saveBitmapToCache(bitmap: Bitmap): Uri {
+        val file = File(cacheDir, "temp_${System.currentTimeMillis()}.jpg")
+        FileOutputStream(file).use { out ->
+            bitmap.compress(Bitmap.CompressFormat.JPEG, 100, out)
+        }
+        return Uri.fromFile(file)
     }
 }
 
