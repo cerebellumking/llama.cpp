@@ -29,6 +29,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -193,9 +194,10 @@ class MainActivity(
                     // 先添加图片消息
                     viewModel.addImageMessage(bitmap)
 
-                    // 直接发送OCR文本给AI，不显示在界面上
-                    viewModel.updateMessage("请解读病例报告并给出简短建议：" + cleanedText)
-                    viewModel.send()
+                    // 显示OCR编辑界面，让用户确认或修改
+                    // viewModel.updateMessage("请解读病例报告并给出简短建议：" + cleanedText)
+                    // viewModel.send()
+                    viewModel.showOcrEditor(cleanedText, bitmap)
                 }
 
                 override fun onFail(e: Throwable) {
@@ -477,6 +479,16 @@ fun MainCompose(
             onSend = { viewModel.send() },
             onCamera = { activity.startCamera() },
             activity = activity
+        )
+    }
+
+    // OCR编辑对话框
+    if (viewModel.isShowingOcrEditor) {
+        OcrEditDialog(
+            text = viewModel.ocrEditText,
+            onTextChange = { viewModel.updateOcrText(it) },
+            onConfirm = { viewModel.confirmOcrAndSend() },
+            onCancel = { viewModel.hideOcrEditor() }
         )
     }
 }
@@ -1083,6 +1095,137 @@ fun InputArea(
                     fontSize = 16.sp,
                     fontWeight = FontWeight.Medium
                 )
+            }
+        }
+    }
+}
+
+@Composable
+fun OcrEditDialog(
+    text: String,
+    onTextChange: (String) -> Unit,
+    onConfirm: () -> Unit,
+    onCancel: () -> Unit
+) {
+    Dialog(onDismissRequest = onCancel) {
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .fillMaxHeight(0.8f)
+                .padding(16.dp),
+            shape = RoundedCornerShape(16.dp),
+            colors = CardDefaults.cardColors(
+                containerColor = AppColors.BackgroundSecondary
+            )
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(20.dp)
+            ) {
+                // 标题
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "OCR识别结果",
+                        fontSize = 20.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = AppColors.TextPrimary
+                    )
+                    IconButton(onClick = onCancel) {
+                        Icon(
+                            imageVector = Icons.Default.Close,
+                            contentDescription = "关闭",
+                            tint = AppColors.TextSecondary
+                        )
+                    }
+                }
+                
+                Spacer(modifier = Modifier.height(16.dp))
+                
+                // 说明文字
+                Text(
+                    text = "请检查并编辑识别出的文字内容，确认无误后发送给AI进行病例解读：",
+                    fontSize = 14.sp,
+                    color = AppColors.TextSecondary,
+                    lineHeight = 20.sp
+                )
+                
+                Spacer(modifier = Modifier.height(16.dp))
+                
+                // 文本编辑框
+                OutlinedTextField(
+                    value = text,
+                    onValueChange = onTextChange,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f),
+                    placeholder = {
+                        Text(
+                            "OCR识别的文字内容...",
+                            color = AppColors.TextMuted
+                        )
+                    },
+                    shape = RoundedCornerShape(12.dp),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = AppColors.InputBorderFocused,
+                        unfocusedBorderColor = AppColors.InputBorder,
+                        focusedContainerColor = AppColors.InputBackground,
+                        unfocusedContainerColor = AppColors.InputBackground,
+                        focusedTextColor = AppColors.TextPrimary,
+                        unfocusedTextColor = AppColors.TextPrimary
+                    ),
+                    maxLines = 15
+                )
+                
+                Spacer(modifier = Modifier.height(20.dp))
+                
+                // 按钮行
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    // 取消按钮
+                    OutlinedButton(
+                        onClick = onCancel,
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(48.dp),
+                        shape = RoundedCornerShape(24.dp),
+                        border = BorderStroke(1.dp, AppColors.InputBorder),
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            contentColor = AppColors.TextSecondary
+                        )
+                    ) {
+                        Text(
+                            "取消",
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+                    
+                    // 确认发送按钮
+                    Button(
+                        onClick = onConfirm,
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(48.dp),
+                        shape = RoundedCornerShape(24.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = AppColors.Primary
+                        )
+                    ) {
+                        Text(
+                            "确认发送",
+                            color = AppColors.TextWhite,
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+                }
             }
         }
     }

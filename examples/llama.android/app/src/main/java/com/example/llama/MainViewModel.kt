@@ -66,6 +66,16 @@ class MainViewModel(
     var currentApiType by mutableStateOf(ApiType.DEEPSEEK)
         private set
 
+    // 添加OCR编辑相关状态
+    var isShowingOcrEditor by mutableStateOf(false)
+        private set
+    
+    var ocrEditText by mutableStateOf("")
+        private set
+    
+    var ocrSourceImage by mutableStateOf<Bitmap?>(null)
+        private set
+
     // 获取当前API服务实例
     private val apiService: ApiService
         get() = ApiService.getInstance(currentApiType)
@@ -241,5 +251,29 @@ class MainViewModel(
 
     fun addImageMessage(bitmap: Bitmap) {
         messages += ChatMessage("", MessageType.USER, bitmap)
+    }
+
+    // 添加OCR编辑相关方法
+    fun showOcrEditor(text: String, image: Bitmap) {
+        ocrEditText = text
+        ocrSourceImage = image
+        isShowingOcrEditor = true
+    }
+    
+    fun hideOcrEditor() {
+        isShowingOcrEditor = false
+        ocrEditText = ""
+        ocrSourceImage = null
+    }
+    
+    fun updateOcrText(text: String) {
+        ocrEditText = text
+    }
+    
+    fun confirmOcrAndSend() {
+        val finalText = "请解读病例报告并给出简短建议：$ocrEditText"
+        message = finalText
+        hideOcrEditor()
+        send()
     }
 }
