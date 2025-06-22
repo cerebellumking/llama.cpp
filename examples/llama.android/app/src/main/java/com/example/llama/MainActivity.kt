@@ -3,7 +3,6 @@ package com.example.llama
 import android.Manifest
 import android.app.ActivityManager
 import android.app.DownloadManager
-import android.content.ClipboardManager
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
@@ -68,6 +67,12 @@ import com.equationl.paddleocr4android.callback.OcrRunCallback
 import com.canhub.cropper.CropImageContract
 import com.canhub.cropper.CropImageContractOptions
 import com.canhub.cropper.CropImageOptions
+import androidx.compose.ui.platform.LocalContext
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
 // 优化的配色方案
 object AppColors {
     // 主色调 - 优雅的蓝色系
@@ -280,7 +285,7 @@ class MainActivity(
             outputCompressFormat = Bitmap.CompressFormat.JPEG
             outputCompressQuality = 90
         }
-        
+
         val cropImageContractOptions = CropImageContractOptions(uri, cropOptions)
         cropImageLauncher.launch(cropImageContractOptions)
     }
@@ -518,7 +523,10 @@ fun MainCompose(
                     MessageItem(
                         content = chatMessage.content,
                         isUserInput = chatMessage.type == MessageType.USER,
-                        image = chatMessage.image
+                        image = chatMessage.image,
+                        onEditMessage = { content ->
+                            viewModel.updateMessage(content)
+                        }
                     )
                 }
             }
@@ -868,7 +876,12 @@ fun ImageViewerDialog(
 }
 
 @Composable
-fun MessageItem(content: String, isUserInput: Boolean, image: Bitmap? = null) {
+fun MessageItem(
+    content: String,
+    isUserInput: Boolean,
+    image: Bitmap? = null,
+    onEditMessage: (String) -> Unit
+) {
     var showImageViewer by remember { mutableStateOf(false) }
 
     Column(
@@ -897,140 +910,15 @@ fun MessageItem(content: String, isUserInput: Boolean, image: Bitmap? = null) {
                     )
                 }
             } else {
-                // 文本消息 - 使用蓝色背景
-                Box(
-                    modifier = Modifier
-                        .widthIn(max = 280.dp)
-                        .clip(
-                            RoundedCornerShape(
-                                topStart = 20.dp,
-                                topEnd = 20.dp,
-                                bottomStart = 20.dp,
-                                bottomEnd = 4.dp
-                            )
-                        )
-                        .background(AppColors.UserBubble)
-                        .padding(16.dp)
-                ) {
-                    Text(
-                        text = content,
-                        color = AppColors.TextWhite,
-                        fontSize = 16.sp,
-                        lineHeight = 22.sp
-                    )
-                }
+                // 文本消息 - 使用蓝色背景，添加交互功能
+                UserMessageBubble(
+                    content = content,
+                    onEditMessage = onEditMessage
+                )
             }
         } else {
             // AI回复气泡 - 简洁边框设计
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(16.dp))
-                    .background(AppColors.AIBubble)
-                    .padding(12.dp)
-            ) {
-                val thinkEndIndex = content.lowercase().indexOf("</think>")
-                val hasThinkContent = thinkEndIndex != -1
-
-                if (hasThinkContent) {
-                    val thinkStartIndex = content.lowercase().indexOf("<think>")
-                    val thinkContent = if (thinkStartIndex != -1) {
-                        content.substring(thinkStartIndex + 7, thinkEndIndex).trim()
-                    } else {
-                        content.substring(0, thinkEndIndex).trim()
-                    }
-                    val replyContent = content.substring(thinkEndIndex + 8).trim()
-
-                    var showThinking by remember { mutableStateOf(false) }
-
-                    Column {
-                        if (thinkContent.isNotEmpty()) {
-                            Card(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable { showThinking = !showThinking },
-                                colors = CardDefaults.cardColors(
-                                    containerColor = AppColors.Background
-                                ),
-                                shape = RoundedCornerShape(8.dp)
-                            ) {
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(12.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Icon(
-                                        imageVector = if (showThinking) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
-                                        contentDescription = if (showThinking) "收起思考" else "展开思考",
-                                        tint = AppColors.TextSecondary,
-                                        modifier = Modifier.size(20.dp)
-                                    )
-                                    Spacer(modifier = Modifier.width(8.dp))
-                                    Text(
-                                        text = "思考过程",
-                                        color = AppColors.TextSecondary,
-                                        fontSize = 14.sp,
-                                        fontWeight = FontWeight.Medium
-                                    )
-                                }
-                            }
-
-                            if (showThinking) {
-                                Spacer(modifier = Modifier.height(8.dp))
-                                Card(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    colors = CardDefaults.cardColors(
-                                        containerColor = AppColors.Background.copy(alpha = 0.5f)
-                                    ),
-                                    shape = RoundedCornerShape(8.dp)
-                                ) {
-                                    MarkdownText(
-                                        markdown = thinkContent,
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .padding(12.dp),
-                                        style = MaterialTheme.typography.bodyMedium.copy(
-                                            color = AppColors.TextSecondary,
-                                            fontSize = 14.sp,
-                                            lineHeight = 20.sp
-                                        )
-                                    )
-                                }
-                            }
-
-                            if (replyContent.isNotEmpty()) {
-                                Spacer(modifier = Modifier.height(12.dp))
-                            }
-                        }
-
-                        // 最终回复内容
-                        if (replyContent.isNotEmpty()) {
-                            MarkdownText(
-                                markdown = replyContent,
-                                modifier = Modifier.fillMaxWidth(),
-                                style = MaterialTheme.typography.bodyLarge.copy(
-                                    color = AppColors.TextPrimary,
-                                    fontSize = 16.sp,
-                                    lineHeight = 24.sp
-                                )
-                            )
-                        }
-                    }
-                } else {
-                    // 没有思考内容，正常显示
-                    val markdownContent = remember(content) { content }
-                    MarkdownText(
-                        markdown = markdownContent,
-                        modifier = Modifier.fillMaxWidth(),
-                        style = MaterialTheme.typography.bodyLarge.copy(
-                            color = AppColors.TextPrimary,
-                            fontSize = 16.sp,
-                            lineHeight = 24.sp
-                        )
-                    )
-                }
-            }
+            AIMessageBubble(content = content)
         }
     }
 
@@ -1040,6 +928,203 @@ fun MessageItem(content: String, isUserInput: Boolean, image: Bitmap? = null) {
             bitmap = image,
             onDismiss = { showImageViewer = false }
         )
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+fun UserMessageBubble(
+    content: String,
+    onEditMessage: (String) -> Unit
+) {
+    val context = LocalContext.current
+    var showMenu by remember { mutableStateOf(false) }
+
+    Box {
+        Box(
+            modifier = Modifier
+                .widthIn(max = 280.dp)
+                .clip(
+                    RoundedCornerShape(
+                        topStart = 20.dp,
+                        topEnd = 20.dp,
+                        bottomStart = 20.dp,
+                        bottomEnd = 4.dp
+                    )
+                )
+                .background(AppColors.UserBubble)
+                .combinedClickable(
+                    onClick = { },
+                    onLongClick = { showMenu = true }
+                )
+                .padding(16.dp)
+        ) {
+            Text(
+                text = content,
+                color = AppColors.TextWhite,
+                fontSize = 16.sp,
+                lineHeight = 22.sp
+            )
+        }
+
+        // 长按菜单
+        DropdownMenu(
+            expanded = showMenu,
+            onDismissRequest = { showMenu = false },
+            modifier = Modifier.background(AppColors.BackgroundSecondary)
+        ) {
+            DropdownMenuItem(
+                text = {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Default.ContentCopy,
+                            contentDescription = "复制",
+                            tint = AppColors.TextSecondary,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("复制", color = AppColors.TextPrimary)
+                    }
+                },
+                onClick = {
+                    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                    val clip = ClipData.newPlainText("消息内容", content)
+                    clipboard.setPrimaryClip(clip)
+                    showMenu = false
+                }
+            )
+            DropdownMenuItem(
+                text = {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Default.Edit,
+                            contentDescription = "编辑",
+                            tint = AppColors.TextSecondary,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("编辑", color = AppColors.TextPrimary)
+                    }
+                },
+                onClick = {
+                    onEditMessage(content)
+                    showMenu = false
+                }
+            )
+        }
+    }
+}
+
+@Composable
+fun AIMessageBubble(content: String) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .background(AppColors.AIBubble)
+            .padding(12.dp)
+    ) {
+        val thinkEndIndex = content.lowercase().indexOf("</think>")
+        val hasThinkContent = thinkEndIndex != -1
+
+        if (hasThinkContent) {
+            val thinkStartIndex = content.lowercase().indexOf("<think>")
+            val thinkContent = if (thinkStartIndex != -1) {
+                content.substring(thinkStartIndex + 7, thinkEndIndex).trim()
+            } else {
+                content.substring(0, thinkEndIndex).trim()
+            }
+            val replyContent = content.substring(thinkEndIndex + 8).trim()
+
+            var showThinking by remember { mutableStateOf(false) }
+
+            Column {
+                if (thinkContent.isNotEmpty()) {
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { showThinking = !showThinking },
+                        colors = CardDefaults.cardColors(
+                            containerColor = AppColors.Background
+                        ),
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = if (showThinking) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                                contentDescription = if (showThinking) "收起思考" else "展开思考",
+                                tint = AppColors.TextSecondary,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "思考过程",
+                                color = AppColors.TextSecondary,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Medium
+                            )
+                        }
+                    }
+
+                    if (showThinking) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = CardDefaults.cardColors(
+                                containerColor = AppColors.Background.copy(alpha = 0.5f)
+                            ),
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            MarkdownText(
+                                markdown = thinkContent,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(12.dp),
+                                style = MaterialTheme.typography.bodyMedium.copy(
+                                    color = AppColors.TextSecondary,
+                                    fontSize = 14.sp,
+                                    lineHeight = 20.sp
+                                )
+                            )
+                        }
+                    }
+
+                    if (replyContent.isNotEmpty()) {
+                        Spacer(modifier = Modifier.height(12.dp))
+                    }
+                }
+
+                // 最终回复内容
+                if (replyContent.isNotEmpty()) {
+                    MarkdownText(
+                        markdown = replyContent,
+                        modifier = Modifier.fillMaxWidth(),
+                        style = MaterialTheme.typography.bodyLarge.copy(
+                            color = AppColors.TextPrimary,
+                            fontSize = 16.sp,
+                            lineHeight = 24.sp
+                        )
+                    )
+                }
+            }
+        } else {
+            // 没有思考内容，正常显示
+            val markdownContent = remember(content) { content }
+            MarkdownText(
+                markdown = markdownContent,
+                modifier = Modifier.fillMaxWidth(),
+                style = MaterialTheme.typography.bodyLarge.copy(
+                    color = AppColors.TextPrimary,
+                    fontSize = 16.sp,
+                    lineHeight = 24.sp
+                )
+            )
+        }
     }
 }
 
@@ -1194,9 +1279,9 @@ fun OcrEditDialog(
                         )
                     }
                 }
-                
+
                 Spacer(modifier = Modifier.height(16.dp))
-                
+
                 // 说明文字
                 Text(
                     text = "请检查并编辑识别出的文字内容，确认无误后发送给AI进行病例解读：",
@@ -1204,9 +1289,9 @@ fun OcrEditDialog(
                     color = AppColors.TextSecondary,
                     lineHeight = 20.sp
                 )
-                
+
                 Spacer(modifier = Modifier.height(16.dp))
-                
+
                 // 文本编辑框
                 OutlinedTextField(
                     value = text,
@@ -1231,9 +1316,9 @@ fun OcrEditDialog(
                     ),
                     maxLines = 15
                 )
-                
+
                 Spacer(modifier = Modifier.height(20.dp))
-                
+
                 // 按钮行
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -1257,7 +1342,7 @@ fun OcrEditDialog(
                             fontWeight = FontWeight.Medium
                         )
                     }
-                    
+
                     // 确认发送按钮
                     Button(
                         onClick = onConfirm,
