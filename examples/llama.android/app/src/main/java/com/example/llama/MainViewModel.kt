@@ -69,10 +69,10 @@ class MainViewModel(
     // 添加OCR编辑相关状态
     var isShowingOcrEditor by mutableStateOf(false)
         private set
-    
+
     var ocrEditText by mutableStateOf("")
         private set
-    
+
     var ocrSourceImage by mutableStateOf<Bitmap?>(null)
         private set
 
@@ -96,15 +96,15 @@ class MainViewModel(
         }
     }
 
-    fun send() {
+    fun send(skipAddingUserMessage: Boolean = false) {
         val text = message
         message = ""
 
         // 检查是否是图片消息（通过检查最后一条消息是否包含图片）
         val isImageMessage = messages.lastOrNull { it.type == MessageType.USER }?.image != null
 
-        // 如果不是图片消息，则显示用户输入
-        if (!isImageMessage) {
+        // 如果不是图片消息且没有跳过添加用户消息，则显示用户输入
+        if (!isImageMessage && !skipAddingUserMessage) {
             messages += ChatMessage(text, MessageType.USER)
         }
 
@@ -259,21 +259,27 @@ class MainViewModel(
         ocrSourceImage = image
         isShowingOcrEditor = true
     }
-    
+
     fun hideOcrEditor() {
         isShowingOcrEditor = false
         ocrEditText = ""
         ocrSourceImage = null
     }
-    
+
     fun updateOcrText(text: String) {
         ocrEditText = text
     }
-    
+
     fun confirmOcrAndSend() {
-        val finalText = "请解读病例报告并给出简短建议：$ocrEditText"
-        message = finalText
+        val ocrMessage = "请解读病例报告并给出简短建议：$ocrEditText"
+
+        messages += ChatMessage(ocrMessage, MessageType.USER)
+
+        message = ocrMessage
+
         hideOcrEditor()
-        send()
+
+        send(skipAddingUserMessage = true)
+        message = ""
     }
 }
