@@ -76,6 +76,12 @@ class MainViewModel(
     var ocrSourceImage by mutableStateOf<Bitmap?>(null)
         private set
 
+    var editingMessageIndex by mutableStateOf(-1)
+        private set
+    
+    var editingText by mutableStateOf("")
+        private set
+
     // 获取当前API服务实例
     private val apiService: ApiService
         get() = ApiService.getInstance(currentApiType)
@@ -281,5 +287,35 @@ class MainViewModel(
 
         send(skipAddingUserMessage = true)
         message = ""
+    }
+
+    // 添加消息编辑相关方法
+    fun startEditingMessage(index: Int, content: String) {
+        editingMessageIndex = index
+        editingText = content
+    }
+    
+    fun cancelEditingMessage() {
+        editingMessageIndex = -1
+        editingText = ""
+    }
+    
+    fun updateEditingText(text: String) {
+        editingText = text
+    }
+    
+    fun confirmEditMessage() {
+        if (editingMessageIndex >= 0 && editingText.isNotBlank()) {
+            // 更新消息内容
+            val updatedMessages = messages.toMutableList()
+            updatedMessages[editingMessageIndex] = updatedMessages[editingMessageIndex].copy(content = editingText)
+            messages = updatedMessages
+            
+            // 发送编辑后的消息
+            message = editingText
+            cancelEditingMessage()
+            send(skipAddingUserMessage = true)
+            message = ""
+        }
     }
 }

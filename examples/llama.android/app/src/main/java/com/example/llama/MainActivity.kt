@@ -71,8 +71,7 @@ import androidx.compose.ui.platform.LocalContext
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
-import androidx.compose.foundation.ExperimentalFoundationApi
-import androidx.compose.foundation.combinedClickable
+
 // 优化的配色方案
 object AppColors {
     // 主色调 - 优雅的蓝色系
@@ -519,13 +518,26 @@ fun MainCompose(
                 contentPadding = PaddingValues(vertical = 16.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                items(viewModel.messages) { chatMessage ->
+                items(viewModel.messages.size) { index ->
+                    val chatMessage = viewModel.messages[index]
                     MessageItem(
                         content = chatMessage.content,
                         isUserInput = chatMessage.type == MessageType.USER,
                         image = chatMessage.image,
-                        onEditMessage = { content ->
-                            viewModel.updateMessage(content)
+                        messageIndex = index,
+                        isEditing = viewModel.editingMessageIndex == index,
+                        editingText = viewModel.editingText,
+                        onEditMessage = { messageIndex, content ->
+                            viewModel.startEditingMessage(messageIndex, content)
+                        },
+                        onUpdateEditingText = { text ->
+                            viewModel.updateEditingText(text)
+                        },
+                        onConfirmEdit = {
+                            viewModel.confirmEditMessage()
+                        },
+                        onCancelEdit = {
+                            viewModel.cancelEditingMessage()
                         }
                     )
                 }
@@ -880,7 +892,13 @@ fun MessageItem(
     content: String,
     isUserInput: Boolean,
     image: Bitmap? = null,
-    onEditMessage: (String) -> Unit
+    messageIndex: Int,
+    isEditing: Boolean,
+    editingText: String,
+    onEditMessage: (Int, String) -> Unit,
+    onUpdateEditingText: (String) -> Unit,
+    onConfirmEdit: () -> Unit,
+    onCancelEdit: () -> Unit
 ) {
     var showImageViewer by remember { mutableStateOf(false) }
 
@@ -913,7 +931,15 @@ fun MessageItem(
                 // 文本消息 - 使用蓝色背景，添加交互功能
                 UserMessageBubble(
                     content = content,
-                    onEditMessage = onEditMessage
+                    messageIndex = messageIndex,
+                    isEditing = isEditing,
+                    editingText = editingText,
+                    onEditMessage = { messageIndex, content ->
+                        onEditMessage(messageIndex, content)
+                    },
+                    onUpdateEditingText = onUpdateEditingText,
+                    onConfirmEdit = onConfirmEdit,
+                    onCancelEdit = onCancelEdit
                 )
             }
         } else {
@@ -931,86 +957,158 @@ fun MessageItem(
     }
 }
 
-@OptIn(ExperimentalFoundationApi::class)
+
 @Composable
 fun UserMessageBubble(
     content: String,
-    onEditMessage: (String) -> Unit
+    messageIndex: Int,
+    isEditing: Boolean,
+    editingText: String,
+    onEditMessage: (Int, String) -> Unit,
+    onUpdateEditingText: (String) -> Unit,
+    onConfirmEdit: () -> Unit,
+    onCancelEdit: () -> Unit
 ) {
     val context = LocalContext.current
-    var showMenu by remember { mutableStateOf(false) }
 
-    Box {
-        Box(
-            modifier = Modifier
-                .widthIn(max = 280.dp)
-                .clip(
-                    RoundedCornerShape(
-                        topStart = 20.dp,
-                        topEnd = 20.dp,
-                        bottomStart = 20.dp,
-                        bottomEnd = 4.dp
+    Column(horizontalAlignment = Alignment.End) {
+        if (isEditing) {
+            // 编辑模式 - 显示可编辑的输入框
+            Card(
+                modifier = Modifier.widthIn(max = 280.dp),
+                shape = RoundedCornerShape(
+                    topStart = 20.dp,
+                    topEnd = 20.dp,
+                    bottomStart = 20.dp,
+                    bottomEnd = 4.dp
+                ),
+                colors = CardDefaults.cardColors(
+                    containerColor = AppColors.InputBackground
+                ),
+                border = BorderStroke(2.dp, AppColors.Primary)
+            ) {
+                Column(
+                    modifier = Modifier.padding(12.dp)
+                ) {
+                    // 编辑输入框
+                    OutlinedTextField(
+                        value = editingText,
+                        onValueChange = onUpdateEditingText,
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = AppColors.Primary,
+                            unfocusedBorderColor = AppColors.InputBorder,
+                            focusedContainerColor = AppColors.InputBackground,
+                            unfocusedContainerColor = AppColors.InputBackground,
+                            focusedTextColor = AppColors.TextPrimary,
+                            unfocusedTextColor = AppColors.TextPrimary
+                        ),
+                        shape = RoundedCornerShape(8.dp),
+                        maxLines = 8
                     )
-                )
-                .background(AppColors.UserBubble)
-                .combinedClickable(
-                    onClick = { },
-                    onLongClick = { showMenu = true }
-                )
-                .padding(16.dp)
-        ) {
-            Text(
-                text = content,
-                color = AppColors.TextWhite,
-                fontSize = 16.sp,
-                lineHeight = 22.sp
-            )
-        }
-
-        // 长按菜单
-        DropdownMenu(
-            expanded = showMenu,
-            onDismissRequest = { showMenu = false },
-            modifier = Modifier.background(AppColors.BackgroundSecondary)
-        ) {
-            DropdownMenuItem(
-                text = {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
+                    
+                    Spacer(modifier = Modifier.height(8.dp))
+                    
+                    // 操作按钮
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        // 取消按钮
+                        OutlinedButton(
+                            onClick = onCancelEdit,
+                            modifier = Modifier.weight(1f).height(36.dp),
+                            colors = ButtonDefaults.outlinedButtonColors(
+                                contentColor = AppColors.TextSecondary
+                            ),
+                            border = BorderStroke(1.dp, AppColors.InputBorder),
+                            shape = RoundedCornerShape(18.dp),
+                            contentPadding = PaddingValues(horizontal = 12.dp)
+                        ) {
+                            Text("取消", fontSize = 14.sp)
+                        }
+                        
+                        // 发送按钮
+                        Button(
+                            onClick = onConfirmEdit,
+                            modifier = Modifier.weight(1f).height(36.dp),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = AppColors.Primary
+                            ),
+                            shape = RoundedCornerShape(18.dp),
+                            contentPadding = PaddingValues(horizontal = 12.dp)
+                        ) {
+                            Text("发送", color = AppColors.TextWhite, fontSize = 14.sp)
+                        }
+                    }
+                }
+            }
+        } else {
+            // 正常显示模式 - 消息气泡和操作按钮
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                // 操作按钮列
+                Column(
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    // 复制按钮
+                    IconButton(
+                        onClick = {
+                            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                            val clip = ClipData.newPlainText("消息内容", content)
+                            clipboard.setPrimaryClip(clip)
+                        },
+                        modifier = Modifier.size(32.dp)
+                    ) {
                         Icon(
                             imageVector = Icons.Default.ContentCopy,
                             contentDescription = "复制",
                             tint = AppColors.TextSecondary,
-                            modifier = Modifier.size(18.dp)
+                            modifier = Modifier.size(16.dp)
                         )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text("复制", color = AppColors.TextPrimary)
                     }
-                },
-                onClick = {
-                    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                    val clip = ClipData.newPlainText("消息内容", content)
-                    clipboard.setPrimaryClip(clip)
-                    showMenu = false
-                }
-            )
-            DropdownMenuItem(
-                text = {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
+                    
+                    // 编辑按钮
+                    IconButton(
+                        onClick = {
+                            onEditMessage(messageIndex, content)
+                        },
+                        modifier = Modifier.size(32.dp)
+                    ) {
                         Icon(
                             imageVector = Icons.Default.Edit,
                             contentDescription = "编辑",
                             tint = AppColors.TextSecondary,
-                            modifier = Modifier.size(18.dp)
+                            modifier = Modifier.size(16.dp)
                         )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text("编辑", color = AppColors.TextPrimary)
                     }
-                },
-                onClick = {
-                    onEditMessage(content)
-                    showMenu = false
                 }
-            )
+                
+                // 消息气泡
+                Box(
+                    modifier = Modifier
+                        .widthIn(max = 250.dp)
+                        .clip(
+                            RoundedCornerShape(
+                                topStart = 20.dp,
+                                topEnd = 20.dp,
+                                bottomStart = 20.dp,
+                                bottomEnd = 4.dp
+                            )
+                        )
+                        .background(AppColors.UserBubble)
+                        .padding(16.dp)
+                ) {
+                    Text(
+                        text = content,
+                        color = AppColors.TextWhite,
+                        fontSize = 16.sp,
+                        lineHeight = 22.sp
+                    )
+                }
+            }
         }
     }
 }
