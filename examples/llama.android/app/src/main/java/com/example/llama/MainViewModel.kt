@@ -306,10 +306,8 @@ class MainViewModel(
     
     fun confirmEditMessage() {
         if (editingMessageIndex >= 0 && editingText.isNotBlank()) {
-            // 更新消息内容
-            val updatedMessages = messages.toMutableList()
-            updatedMessages[editingMessageIndex] = updatedMessages[editingMessageIndex].copy(content = editingText)
-            messages = updatedMessages
+            // 添加新的用户消息，而不是覆盖原消息
+            messages += ChatMessage(editingText, MessageType.USER)
             
             // 发送编辑后的消息
             message = editingText
