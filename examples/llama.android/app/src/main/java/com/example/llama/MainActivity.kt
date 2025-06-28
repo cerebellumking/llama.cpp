@@ -47,7 +47,6 @@ import com.example.llama.api.ApiType
 import com.example.llama.ui.theme.LlamaAndroidTheme
 import java.io.File
 import java.io.FileOutputStream
-import com.benjaminwan.ocrlibrary.OcrEngine
 import kotlinx.coroutines.delay
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onGloballyPositioned
@@ -354,50 +353,50 @@ class MainActivity(
             // 本地模型
             Downloadable(
                 name = "DeepSeek-R1-DRAFT-Qwen2.5-0.5B (Q4_K_M, 0.4 GiB)",
-                source = Uri.parse("https://huggingface.co/alamios/DeepSeek-R1-DRAFT-Qwen2.5-0.5B-GGUF/resolve/main/DeepSeek-R1-DRAFT-Qwen2.5-0.5B-Q4_K_M.gguf?download=true"),
+                source = Uri.parse("https://modelscope.cn/alamios/DeepSeek-R1-DRAFT-Qwen2.5-0.5B-GGUF/resolve/main/DeepSeek-R1-DRAFT-Qwen2.5-0.5B-Q4_K_M.gguf?download=true"),
                 destination = File(extFilesDir, "DeepSeek-R1-DRAFT-Qwen2.5-0.5B-Q4_K_M.gguf"),
                 isApiModel = false
             ),
             Downloadable(
                 name = "DeepSeek-R1-DRAFT-Qwen2.5-0.5B (FP16, 1 GiB)",
-                source = Uri.parse("https://huggingface.co/alamios/DeepSeek-R1-DRAFT-Qwen2.5-0.5B-GGUF/resolve/main/DeepSeek-R1-DRAFT-Qwen2.5-0.5B-f16.gguf?download=true"),
+                source = Uri.parse("https://modelscope.cn/alamios/DeepSeek-R1-DRAFT-Qwen2.5-0.5B-GGUF/resolve/main/DeepSeek-R1-DRAFT-Qwen2.5-0.5B-f16.gguf?download=true"),
                 destination = File(extFilesDir, "DeepSeek-R1-DRAFT-Qwen2.5-0.5B-f16.gguf"),
                 isApiModel = false
             ),
             Downloadable(
                 name = "Qwen3-0.6B (Q4_0, 0.4 GiB)",
-                source = Uri.parse("https://huggingface.co/unsloth/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q4_0.gguf?download=true"),
+                source = Uri.parse("https://modelscope.cn/unsloth/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q4_0.gguf?download=true"),
                 destination = File(extFilesDir, "Qwen3-0.6B-Q4_0.gguf"),
                 isApiModel = false
             ),
             Downloadable(
                 name = "Qwen3-0.6B (FP16, 1.2GiB)",
-                source = Uri.parse("https://huggingface.co/unsloth/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-BF16.gguf?download=true"),
+                source = Uri.parse("https://modelscope.cn/unsloth/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-BF16.gguf?download=true"),
                 destination = File(extFilesDir, "Qwen3-0.6B-BF16.gguf"),
                 isApiModel = false
             ),
             // 协同推理
             Downloadable(
                 name = "Qwen2.5-32B+Qwen2.5-0.5B_Q4_K_M",
-                source = Uri.parse("https://huggingface.co/alamios/DeepSeek-R1-DRAFT-Qwen2.5-0.5B-GGUF/resolve/main/DeepSeek-R1-DRAFT-Qwen2.5-0.5B-Q4_K_M.gguf?download=true"),
+                source = Uri.parse("https://modelscope.cn/alamios/DeepSeek-R1-DRAFT-Qwen2.5-0.5B-GGUF/resolve/main/DeepSeek-R1-DRAFT-Qwen2.5-0.5B-Q4_K_M.gguf?download=true"),
                 destination = File(extFilesDir, "DeepSeek-R1-DRAFT-Qwen2.5-0.5B-Q4_K_M.gguf"),
                 isHetero = true
             ),
             Downloadable(
                 name = "Qwen2.5-32B+Qwen2.5-0.5B",
-                source = Uri.parse("https://huggingface.co/alamios/DeepSeek-R1-DRAFT-Qwen2.5-0.5B-GGUF/resolve/main/DeepSeek-R1-DRAFT-Qwen2.5-0.5B-f16.gguf?download=true"),
+                source = Uri.parse("https://modelscope.cn/alamios/DeepSeek-R1-DRAFT-Qwen2.5-0.5B-GGUF/resolve/main/DeepSeek-R1-DRAFT-Qwen2.5-0.5B-f16.gguf?download=true"),
                 destination = File(extFilesDir, "DeepSeek-R1-DRAFT-Qwen2.5-0.5B-f16.gguf"),
                 isHetero = true
             ),
             Downloadable(
                 name = "Qwen3-32B+Qwen3-0.6B_Q4_0",
-                source = Uri.parse("https://huggingface.co/unsloth/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q4_0.gguf?download=true"),
+                source = Uri.parse("https://modelscope.cn/unsloth/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q4_0.gguf?download=true"),
                 destination = File(extFilesDir, "Qwen3-0.6B-Q4_0.gguf"),
                 isHetero = true
             ),
             Downloadable(
                 name = "Qwen3-32B+Qwen3-0.6B",
-                source = Uri.parse("https://huggingface.co/unsloth/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-BF16.gguf?download=true"),
+                source = Uri.parse("https://modelscope.cn/unsloth/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-BF16.gguf?download=true"),
                 destination = File(extFilesDir, "Qwen3-0.6B-BF16.gguf"),
                 isHetero = true
             )
@@ -1006,9 +1005,9 @@ fun UserMessageBubble(
                         shape = RoundedCornerShape(8.dp),
                         maxLines = 8
                     )
-                    
+
                     Spacer(modifier = Modifier.height(8.dp))
-                    
+
                     // 操作按钮
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -1027,7 +1026,7 @@ fun UserMessageBubble(
                         ) {
                             Text("取消", fontSize = 14.sp)
                         }
-                        
+
                         // 发送按钮
                         Button(
                             onClick = onConfirmEdit,
@@ -1069,7 +1068,7 @@ fun UserMessageBubble(
                             modifier = Modifier.size(16.dp)
                         )
                     }
-                    
+
                     // 编辑按钮
                     IconButton(
                         onClick = {
@@ -1085,7 +1084,7 @@ fun UserMessageBubble(
                         )
                     }
                 }
-                
+
                 // 消息气泡
                 Box(
                     modifier = Modifier
