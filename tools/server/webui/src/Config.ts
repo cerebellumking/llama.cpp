@@ -39,6 +39,13 @@ export const CONFIG_DEFAULT = {
   dry_penalty_last_n: -1,
   max_tokens: -1,
   custom: '', // custom json-stringified object
+
+  // HeteroSpec: cloud collaborative speculative decoding
+  heterospec_enabled: false,
+  heterospec_server_url: '',
+  heterospec_n_draft: 3,
+  heterospec_timeout_ms: 500,
+
   // experimental features
   pyIntepreterEnabled: false,
 };
@@ -83,6 +90,16 @@ export const CONFIG_INFO: Record<string, string> = {
     'DRY sampling reduces repetition in generated text even across long contexts. This parameter sets DRY penalty for the last n tokens.',
   max_tokens: 'The maximum number of token per output.',
   custom: '', // custom json-stringified object
+
+  // HeteroSpec configurations
+  heterospec_enabled:
+    'Enable cloud collaborative speculative decoding for faster generation.',
+  heterospec_server_url:
+    'WebSocket URL of the cloud server for speculative decoding (e.g., ws://server:8080).',
+  heterospec_n_draft:
+    'Number of draft tokens to generate locally before cloud verification.',
+  heterospec_timeout_ms:
+    'Timeout in milliseconds for waiting cloud verification response.',
 };
 // config keys having numeric value (i.e. temperature, top_k, top_p, etc)
 export const CONFIG_NUMERIC_KEYS = Object.entries(CONFIG_DEFAULT)

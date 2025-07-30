@@ -186,6 +186,30 @@ export default function ChatMessage({
                     <br />- Time: {timings.predicted_ms} ms
                     <br />- Speed: {timings.predicted_per_second.toFixed(1)} t/s
                     <br />
+                    {timings.heterospec_stats && (
+                      <>
+                        <b>HeteroSpec</b>
+                        <br />- Drafts:{' '}
+                        {timings.heterospec_stats.accepted_drafts}/
+                        {timings.heterospec_stats.total_drafts}
+                        <br />- Accept Rate:{' '}
+                        {(
+                          timings.heterospec_stats.acceptance_rate * 100
+                        ).toFixed(1)}
+                        %
+                        <br />- Avg Draft:{' '}
+                        {timings.heterospec_stats.avg_draft_time_ms.toFixed(
+                          1
+                        )}{' '}
+                        ms
+                        <br />- Avg Verify:{' '}
+                        {timings.heterospec_stats.avg_verify_time_ms.toFixed(
+                          1
+                        )}{' '}
+                        ms
+                        <br />
+                      </>
+                    )}
                   </div>
                 </div>
               )}

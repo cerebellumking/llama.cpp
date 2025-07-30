@@ -12,6 +12,7 @@ import {
   StopIcon,
   PaperClipIcon,
 } from '@heroicons/react/24/solid';
+import { CloudIcon, ServerIcon } from '@heroicons/react/24/outline';
 import {
   ChatExtraContextApi,
   useChatExtraContext,
@@ -105,6 +106,9 @@ export default function ChatScreen() {
 
   // keep track of leaf node for rendering
   const [currNodeId, setCurrNodeId] = useState<number>(-1);
+
+  // HeteroSpec mode toggle state
+  const [useHeteroSpec, setUseHeteroSpec] = useState(false);
   const messages: MessageDisplay[] = useMemo(() => {
     if (!viewingChat) return [];
     else return getListMessageDisplay(viewingChat.messages, currNodeId);
@@ -145,7 +149,8 @@ export default function ChatScreen() {
         lastMsgNodeId,
         lastInpMsg,
         extraContext.items,
-        onChunk
+        onChunk,
+        useHeteroSpec
       ))
     ) {
       // restore the input message if failed
@@ -265,6 +270,8 @@ export default function ChatScreen() {
           onSend={sendNewMessage}
           onStop={() => stopGenerating(currConvId ?? '')}
           isGenerating={isGenerating(currConvId ?? '')}
+          useHeteroSpec={useHeteroSpec}
+          setUseHeteroSpec={setUseHeteroSpec}
         />
       </div>
       <div className="w-full sticky top-[7em] h-[calc(100vh-9em)]">
@@ -317,12 +324,16 @@ function ChatInput({
   onSend,
   onStop,
   isGenerating,
+  useHeteroSpec,
+  setUseHeteroSpec,
 }: {
   textarea: ChatTextareaApi;
   extraContext: ChatExtraContextApi;
   onSend: () => void;
   onStop: () => void;
   isGenerating: boolean;
+  useHeteroSpec: boolean;
+  setUseHeteroSpec: (use: boolean) => void;
 }) {
   const { config } = useAppContext();
   const [isDrag, setIsDrag] = useState(false);
@@ -433,6 +444,33 @@ function ChatInput({
                   {...getInputProps()}
                   hidden
                 />
+
+                {/* HeteroSpec Toggle Button */}
+                {config.heterospec_enabled && config.heterospec_server_url && (
+                  <button
+                    className={classNames({
+                      'btn w-8 h-8 p-0 rounded-full': true,
+                      'btn-primary': useHeteroSpec,
+                      'btn-neutral': !useHeteroSpec,
+                      'btn-disabled': isGenerating,
+                    })}
+                    onClick={() => setUseHeteroSpec(!useHeteroSpec)}
+                    disabled={isGenerating}
+                    aria-label={`Switch to ${useHeteroSpec ? 'local' : 'HeteroSpec'} mode`}
+                    title={
+                      useHeteroSpec
+                        ? 'Currently using HeteroSpec (cloud). Click to switch to local server.'
+                        : 'Currently using local server. Click to switch to HeteroSpec (cloud).'
+                    }
+                  >
+                    {useHeteroSpec ? (
+                      <CloudIcon className="h-5 w-5" />
+                    ) : (
+                      <ServerIcon className="h-5 w-5" />
+                    )}
+                  </button>
+                )}
+
                 {isGenerating ? (
                   <button
                     className="btn btn-neutral w-8 h-8 p-0 rounded-full"
@@ -454,6 +492,37 @@ function ChatInput({
           </div>
         )}
       </Dropzone>
+
+      {/* HeteroSpec Status */}
+      <HeteroSpecStatus useHeteroSpec={useHeteroSpec} />
+    </div>
+  );
+}
+
+function HeteroSpecStatus({ useHeteroSpec }: { useHeteroSpec: boolean }) {
+  const { config } = useAppContext();
+
+  if (!config.heterospec_enabled || !config.heterospec_server_url) {
+    return null;
+  }
+
+  return (
+    <div className="flex items-center justify-center mt-2 text-xs text-base-content/50">
+      {useHeteroSpec ? (
+        <>
+          <CloudIcon className="w-3 h-3 mr-1" />
+          <span>
+            Using HeteroSpec: {config.heterospec_server_url} (drafts:{' '}
+            {config.heterospec_n_draft}, timeout: {config.heterospec_timeout_ms}
+            ms)
+          </span>
+        </>
+      ) : (
+        <>
+          <ServerIcon className="w-3 h-3 mr-1" />
+          <span>Using Local Server</span>
+        </>
+      )}
     </div>
   );
 }

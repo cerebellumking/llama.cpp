@@ -2777,6 +2777,34 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_examples({LLAMA_EXAMPLE_SERVER}));
     add_opt(common_arg(
+    {"--heterospec-enabled"},
+    string_format("enable HeteroSpec cloud collaborative speculative decoding (default: %s)", params.heterospec_enabled ? "enabled" : "disabled"),
+    [](common_params & params) {
+        params.heterospec_enabled = true;
+    }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
+        {"--heterospec-server-url"}, "URL",
+        string_format("WebSocket URL for HeteroSpec cloud server (default: %s)", params.heterospec_server_url.c_str()),
+        [](common_params & params, const std::string & value) {
+            params.heterospec_server_url = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
+        {"--heterospec-n-draft"}, "N",
+        string_format("number of draft tokens for HeteroSpec (default: %d)", params.heterospec_n_draft),
+        [](common_params & params, int value) {
+            params.heterospec_n_draft = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
+        {"--heterospec-timeout-ms"}, "MS",
+        string_format("timeout in milliseconds for HeteroSpec cloud verification (default: %d)", params.heterospec_timeout_ms),
+        [](common_params & params, int value) {
+            params.heterospec_timeout_ms = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
         {"--ssl-key-file"}, "FNAME",
         "path to file a PEM-encoded SSL private key",
         [](common_params & params, const std::string & value) {

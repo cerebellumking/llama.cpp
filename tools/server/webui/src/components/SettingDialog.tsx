@@ -11,6 +11,7 @@ import {
   FunnelIcon,
   HandRaisedIcon,
   SquaresPlusIcon,
+  CloudIcon,
 } from '@heroicons/react/24/outline';
 import { OpenInNewTab } from '../utils/common';
 import { useModals } from './ModalProvider';
@@ -40,6 +41,12 @@ const PENALTY_KEYS: SettKey[] = [
   'dry_base',
   'dry_allowed_length',
   'dry_penalty_last_n',
+];
+
+const HETEROSPEC_KEYS: SettKey[] = [
+  'heterospec_server_url',
+  'heterospec_n_draft',
+  'heterospec_timeout_ms',
 ];
 
 enum SettingInputType {
@@ -148,6 +155,29 @@ const SETTING_SECTIONS: SettingSection[] = [
       label: key,
       key,
     })),
+  },
+  {
+    title: (
+      <>
+        <CloudIcon className={ICON_CLASSNAME} />
+        HeteroSpec (Cloud Collaborative Speculative Decoding)
+      </>
+    ),
+    fields: [
+      {
+        type: SettingInputType.CHECKBOX,
+        label: 'Enable HeteroSpec',
+        key: 'heterospec_enabled',
+      },
+      ...HETEROSPEC_KEYS.map(
+        (key) =>
+          ({
+            type: SettingInputType.SHORT_INPUT,
+            label: key.replace('heterospec_', '').replace('_', ' '),
+            key,
+          }) as SettingFieldInput
+      ),
+    ],
   },
   {
     title: (

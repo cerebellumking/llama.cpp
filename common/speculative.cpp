@@ -154,7 +154,6 @@ llama_tokens speculative_gen_draft(
 
     LOG_DBG("%s: n_past = %d\n", __func__, n_past);
 
-    common_batch_clear(batch);
     common_batch_add  (batch, id_last, n_past, { 0 }, true);
 
     llama_decode(ctx, batch);

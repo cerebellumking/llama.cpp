@@ -29,7 +29,8 @@ interface AppContextValue {
     leafNodeId: Message['id'] | null,
     content: string,
     extra: Message['extra'],
-    onChunk: CallbackGeneratedChunk
+    onChunk: CallbackGeneratedChunk,
+    useHeteroSpec?: boolean
   ) => Promise<boolean>;
   stopGenerating: (convId: string) => void;
   replaceMessageAndGenerate: (
@@ -100,6 +101,43 @@ export const AppContextProvider = ({
       .then((props) => {
         console.debug('Server props:', props);
         setServerProps(props);
+
+        // Extract heterospec defaults from server props if available
+        console.log('Server props received:', props);
+        if (props.default_generation_settings) {
+          const serverDefaults: Partial<typeof CONFIG_DEFAULT> = {};
+          const settings = props.default_generation_settings;
+          console.log('Server generation settings:', settings);
+
+          // Map server heterospec parameters to config keys
+          if (typeof settings.heterospec_enabled === 'boolean') {
+            serverDefaults.heterospec_enabled = settings.heterospec_enabled;
+          }
+          if (
+            typeof settings.heterospec_server_url === 'string' &&
+            settings.heterospec_server_url
+          ) {
+            serverDefaults.heterospec_server_url =
+              settings.heterospec_server_url;
+          }
+          if (typeof settings.heterospec_n_draft === 'number') {
+            serverDefaults.heterospec_n_draft = settings.heterospec_n_draft;
+          }
+          if (typeof settings.heterospec_timeout_ms === 'number') {
+            serverDefaults.heterospec_timeout_ms =
+              settings.heterospec_timeout_ms;
+          }
+
+          console.log('Extracted server defaults:', serverDefaults);
+
+          // Always merge with server defaults, even if empty (for debugging)
+          const mergedConfig =
+            StorageUtils.mergeWithServerDefaults(serverDefaults);
+          console.log('Setting merged config:', mergedConfig);
+          setConfig(mergedConfig);
+        } else {
+          console.log('No default_generation_settings found in server props');
+        }
       })
       .catch((err) => {
         console.error(err);
@@ -156,7 +194,8 @@ export const AppContextProvider = ({
   const generateMessage = async (
     convId: string,
     leafNodeId: Message['id'],
-    onChunk: CallbackGeneratedChunk
+    onChunk: CallbackGeneratedChunk,
+    useHeteroSpec?: boolean
   ) => {
     if (isGenerating(convId)) return;
 
@@ -205,6 +244,10 @@ export const AppContextProvider = ({
       if (isDev) console.log({ messages });
 
       // prepare params
+      const customParams = config.custom.length
+        ? JSON.parse(config.custom)
+        : {};
+
       const params = {
         messages,
         stream: true,
@@ -229,7 +272,26 @@ export const AppContextProvider = ({
         dry_penalty_last_n: config.dry_penalty_last_n,
         max_tokens: config.max_tokens,
         timings_per_token: !!config.showTokensPerSecond,
-        ...(config.custom.length ? JSON.parse(config.custom) : {}),
+
+        // Apply custom params first
+        ...customParams,
+
+        // HeteroSpec parameters (only if useHeteroSpec is true and not already set in custom params)
+        ...(useHeteroSpec &&
+        config.heterospec_enabled &&
+        config.heterospec_server_url
+          ? {
+              heterospec_enabled: customParams.heterospec_enabled ?? true,
+              heterospec_server_url:
+                customParams.heterospec_server_url ??
+                config.heterospec_server_url,
+              heterospec_n_draft:
+                customParams.heterospec_n_draft ?? config.heterospec_n_draft,
+              heterospec_timeout_ms:
+                customParams.heterospec_timeout_ms ??
+                config.heterospec_timeout_ms,
+            }
+          : {}),
       };
 
       // send request
@@ -300,7 +362,8 @@ export const AppContextProvider = ({
     leafNodeId: Message['id'] | null,
     content: string,
     extra: Message['extra'],
-    onChunk: CallbackGeneratedChunk
+    onChunk: CallbackGeneratedChunk,
+    useHeteroSpec?: boolean
   ): Promise<boolean> => {
     if (isGenerating(convId ?? '') || content.trim().length === 0) return false;
 
@@ -333,7 +396,7 @@ export const AppContextProvider = ({
     onChunk(currMsgId);
 
     try {
-      await generateMessage(convId, currMsgId, onChunk);
+      await generateMessage(convId, currMsgId, onChunk, useHeteroSpec);
       return true;
     } catch (_) {
       // TODO: rollback

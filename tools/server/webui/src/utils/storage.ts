@@ -200,6 +200,47 @@ const StorageUtils = {
       ...savedVal,
     };
   },
+  // merge server defaults with user config - prioritize server defaults for heterospec
+  mergeWithServerDefaults(
+    serverDefaults: Partial<typeof CONFIG_DEFAULT>
+  ): typeof CONFIG_DEFAULT {
+    const userConfig = this.getConfig();
+    console.log('Server defaults received:', serverDefaults);
+    console.log('User config:', userConfig);
+
+    // Start with default config
+    const merged = { ...CONFIG_DEFAULT };
+
+    // Apply server defaults first
+    Object.keys(serverDefaults).forEach((key) => {
+      const typedKey = key as keyof typeof CONFIG_DEFAULT;
+      if (serverDefaults[typedKey] !== undefined) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (merged as any)[typedKey] = serverDefaults[typedKey];
+      }
+    });
+
+    // For heterospec params, only override with user config if user has explicitly changed them
+    Object.keys(userConfig).forEach((key) => {
+      const typedKey = key as keyof typeof CONFIG_DEFAULT;
+
+      if (key.startsWith('heterospec_')) {
+        // For heterospec params, only use user config if it's different from default
+        if (userConfig[typedKey] !== CONFIG_DEFAULT[typedKey]) {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          (merged as any)[typedKey] = userConfig[typedKey];
+        }
+        // Otherwise keep server default (already applied above)
+      } else {
+        // For other params, always use user config
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (merged as any)[typedKey] = userConfig[typedKey];
+      }
+    });
+
+    console.log('Merged config:', merged);
+    return merged;
+  },
   setConfig(config: typeof CONFIG_DEFAULT) {
     localStorage.setItem('config', JSON.stringify(config));
   },

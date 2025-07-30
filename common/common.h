@@ -364,6 +364,12 @@ struct common_params {
     int32_t n_threads_http = -1;           // number of threads to process HTTP requests (TODO: support threadpool)
     int32_t n_cache_reuse  = 0;            // min chunk size to reuse from the cache via KV shifting
 
+    // HeteroSpec params
+    bool heterospec_enabled = false;
+    std::string heterospec_server_url = "";
+    int32_t heterospec_n_draft = 3;
+    int32_t heterospec_timeout_ms = 500;
+
     std::string hostname      = "127.0.0.1";
     std::string public_path   = "";                                                                         // NOLINT
     std::string chat_template = "";                                                                         // NOLINT

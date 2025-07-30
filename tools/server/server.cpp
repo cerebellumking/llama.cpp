@@ -11,6 +11,10 @@
 #include "mtmd.h"
 #include "mtmd-helper.h"
 
+// HeteroSpec: WebSocket client for cloud speculative decoding
+#include "websocketpp/client.hpp"
+#include "websocketpp/config/asio_client.hpp"
+
 // mime type for sending response
 #define MIMETYPE_JSON "application/json; charset=utf-8"
 
@@ -34,6 +38,9 @@
 using json = nlohmann::ordered_json;
 
 constexpr int HTTP_POLLING_SECONDS = 1;
+
+// HeteroSpec: WebSocket client type
+typedef websocketpp::client<websocketpp::config::asio_client> ws_client;
 
 enum stop_type {
     STOP_TYPE_NONE,
@@ -68,6 +75,7 @@ enum server_task_type {
     SERVER_TASK_TYPE_SLOT_RESTORE,
     SERVER_TASK_TYPE_SLOT_ERASE,
     SERVER_TASK_TYPE_SET_LORA,
+    SERVER_TASK_TYPE_HETEROSPEC_COMPLETION, // HeteroSpec: cloud collaborative speculative decoding
 };
 
 enum oaicompat_type {
@@ -111,6 +119,12 @@ struct slot_params {
 
     struct common_params_sampling sampling;
     struct common_params_speculative speculative;
+    
+    // HeteroSpec: cloud collaborative speculative decoding parameters
+    bool heterospec_enabled = false;
+    std::string heterospec_server_url;
+    int32_t heterospec_n_draft = 3;     // number of draft tokens to generate locally
+    int32_t heterospec_timeout_ms = 500; // timeout for cloud verification
 
     // OAI-compat fields
     bool                         verbose                   = false;
@@ -183,6 +197,10 @@ struct slot_params {
             {"speculative.n_max",         speculative.n_max},
             {"speculative.n_min",         speculative.n_min},
             {"speculative.p_min",         speculative.p_min},
+            {"heterospec_enabled",        heterospec_enabled},
+            {"heterospec_server_url",     heterospec_server_url},
+            {"heterospec_n_draft",        heterospec_n_draft},
+            {"heterospec_timeout_ms",     heterospec_timeout_ms},
             {"timings_per_token",         timings_per_token},
             {"post_sampling_probs",       post_sampling_probs},
             {"lora",                      lora},
@@ -233,6 +251,12 @@ struct server_task {
         slot_params defaults;
         defaults.sampling    = params_base.sampling;
         defaults.speculative = params_base.speculative;
+        
+        // HeteroSpec parameter defaults from global server context
+        defaults.heterospec_enabled = params_base.heterospec_enabled;
+        defaults.heterospec_server_url = params_base.heterospec_server_url;
+        defaults.heterospec_n_draft = params_base.heterospec_n_draft;
+        defaults.heterospec_timeout_ms = params_base.heterospec_timeout_ms;
 
         // enabling this will output extra debug information in the HTTP responses from the server
         params.verbose           = params_base.verbosity > 9;
@@ -282,6 +306,15 @@ struct server_task {
         params.speculative.n_min = std::min(params.speculative.n_max, params.speculative.n_min);
         params.speculative.n_min = std::max(params.speculative.n_min, 0);
         params.speculative.n_max = std::max(params.speculative.n_max, 0);
+        
+        // HeteroSpec parameters
+        params.heterospec_enabled = json_value(data, "heterospec_enabled", defaults.heterospec_enabled);
+        params.heterospec_server_url = json_value(data, "heterospec_server_url", defaults.heterospec_server_url);
+        params.heterospec_n_draft = json_value(data, "heterospec_n_draft", defaults.heterospec_n_draft);
+        params.heterospec_timeout_ms = json_value(data, "heterospec_timeout_ms", defaults.heterospec_timeout_ms);
+        
+        params.heterospec_n_draft = std::max(params.heterospec_n_draft, 1);
+        params.heterospec_timeout_ms = std::max(params.heterospec_timeout_ms, 100);
 
         // Use OpenAI API logprobs only if n_probs wasn't provided
         if (data.contains("logprobs") && params.sampling.n_probs == defaults.sampling.n_probs){
@@ -1217,6 +1250,56 @@ struct server_task_result_apply_lora : server_task_result {
     }
 };
 
+// HeteroSpec: Cloud collaborative speculative decoding state
+struct heterospec_state {
+    ws_client client;
+    websocketpp::connection_hdl connection;
+    std::string server_url;
+    bool is_connected = false;
+    bool is_enabled = false;
+    std::vector<llama_token> accepted_tokens;
+    std::mutex mutex;
+    std::condition_variable cv;
+    std::vector<llama_token> prompt_tokens;
+    int n_past = 0;
+    llama_token last_token = -1;
+    std::thread client_thread;
+    std::condition_variable connect_cv;
+    bool connection_ready = false;
+    
+    // Statistics
+    std::vector<double> draft_times;
+    std::vector<double> verify_times;
+    int total_drafts = 0;
+    int accepted_drafts = 0;
+    
+    heterospec_state() = default;
+    
+    ~heterospec_state() {
+        cleanup();
+    }
+    
+    void cleanup() {
+        if (is_connected && client_thread.joinable()) {
+            client.stop();
+            client_thread.join();
+            is_connected = false;
+        }
+    }
+    
+    void reset() {
+        accepted_tokens.clear();
+        prompt_tokens.clear();
+        n_past = 0;
+        last_token = -1;
+        connection_ready = false;
+        draft_times.clear();
+        verify_times.clear();
+        total_drafts = 0;
+        accepted_drafts = 0;
+    }
+};
+
 struct server_slot {
     int id;
     int id_task = -1;
@@ -1233,6 +1316,9 @@ struct server_slot {
     mtmd_context * mctx = nullptr;
 
     common_speculative * spec = nullptr;
+    
+    // HeteroSpec: cloud collaborative speculative decoding
+    heterospec_state * hetero_spec = nullptr;
 
     std::vector<common_adapter_lora_info> lora;
 
@@ -1327,6 +1413,11 @@ struct server_slot {
         // clear speculative decoding stats
         n_draft_total = 0;
         n_draft_accepted = 0;
+        
+        // HeteroSpec: reset cloud collaborative state
+        if (hetero_spec) {
+            hetero_spec->reset();
+        }
     }
 
     bool is_non_causal() const {
@@ -1844,6 +1935,159 @@ struct server_response {
     }
 };
 
+// HeteroSpec: WebSocket initialization and communication functions
+static bool heterospec_init_websocket(heterospec_state& state, const std::string& url) {
+    if (state.is_connected) return true;
+
+    // 优化日志开销
+    state.client.clear_access_channels(websocketpp::log::alevel::all);
+    state.client.set_access_channels(
+            websocketpp::log::alevel::connect |
+            websocketpp::log::alevel::disconnect |
+            websocketpp::log::alevel::fail
+    );
+
+    state.client.clear_error_channels(websocketpp::log::elevel::all);
+    state.client.set_error_channels(
+            websocketpp::log::elevel::rerror |
+            websocketpp::log::elevel::fatal
+    );
+
+    state.client.set_max_message_size(1024 * 1024);
+    state.client.set_max_http_body_size(1024 * 1024);
+
+    state.client.set_message_handler([&state](websocketpp::connection_hdl, ws_client::message_ptr msg) {
+        try {
+            const auto* data = reinterpret_cast<const uint8_t*>(msg->get_payload().data());
+            const size_t size = msg->get_payload().size();
+
+            if (size > 0 && data[0] == 0x01) {  // verify消息
+                std::vector<llama_token> tokens;
+                tokens.reserve((size - 1) / sizeof(llama_token));
+
+                const llama_token* token_ptr = reinterpret_cast<const llama_token*>(data + 1);
+                const size_t num_tokens = (size - 1) / sizeof(llama_token);
+                tokens.assign(token_ptr, token_ptr + num_tokens);
+
+                std::unique_lock<std::mutex> lock(state.mutex);
+                state.accepted_tokens = std::move(tokens);
+                state.cv.notify_one();
+            }
+        } catch (const std::exception& e) {
+            SRV_ERR("HeteroSpec: Error parsing message: %s\n", e.what());
+        }
+    });
+
+    state.client.set_open_handler([&state](websocketpp::connection_hdl) {
+        std::unique_lock<std::mutex> lock(state.mutex);
+        state.connection_ready = true;
+        state.connect_cv.notify_all();
+        SRV_INF("HeteroSpec: WebSocket connection opened: %s", "");
+    });
+
+    state.client.init_asio();
+
+    websocketpp::lib::error_code ec;
+    auto con = state.client.get_connection(url, ec);
+    if (ec) {
+        SRV_ERR("HeteroSpec: Failed to create connection: %s\n", ec.message().c_str());
+        return false;
+    }
+
+    state.client.connect(con);
+
+    // 在单独的线程中运行客户端
+    state.client_thread = std::thread([&state]() {
+        try {
+            state.client.run();
+        } catch (const std::exception& e) {
+            SRV_ERR("HeteroSpec: WebSocket client thread error: %s\n", e.what());
+        }
+    });
+
+    {
+        std::unique_lock<std::mutex> lock(state.mutex);
+        if (!state.connect_cv.wait_for(lock, std::chrono::seconds(15), [&state] {
+            return state.connection_ready;
+        })) {
+            SRV_ERR("HeteroSpec: WebSocket connection timeout: %s", "");
+            return false;
+        }
+    }
+
+    state.is_connected = true;
+    state.connection = con->get_handle();
+    return true;
+}
+
+static bool heterospec_send_prefill(heterospec_state& state, const llama_tokens& tokens) {
+    if (!state.is_connected || !state.connection_ready) {
+        return false;
+    }
+
+    try {
+        // 准备二进制消息
+        std::vector<uint8_t> binary_msg;
+        binary_msg.reserve(1 + tokens.size() * sizeof(llama_token));
+        binary_msg.push_back(0x00);  // 消息类型：prefill
+
+        // 直接复制token数据
+        const size_t data_size = tokens.size() * sizeof(llama_token);
+        binary_msg.resize(1 + data_size);
+        memcpy(binary_msg.data() + 1, tokens.data(), data_size);
+
+        state.client.send(state.connection, binary_msg.data(), binary_msg.size(), websocketpp::frame::opcode::binary);
+        SRV_DBG("HeteroSpec: Prefill message sent successfully: %s", "");
+        return true;
+    } catch (const std::exception& e) {
+        SRV_ERR("HeteroSpec: Exception while sending prefill: %s\n", e.what());
+        return false;
+    }
+}
+
+static bool heterospec_send_verify_and_wait(heterospec_state& state, const llama_tokens& draft_tokens, int timeout_ms) {
+    if (!state.is_connected || !state.connection_ready) {
+        return false;
+    }
+
+    try {
+        auto start = std::chrono::high_resolution_clock::now();
+
+        // 准备二进制消息
+        std::vector<uint8_t> binary_msg;
+        binary_msg.reserve(1 + draft_tokens.size() * sizeof(llama_token));
+        binary_msg.push_back(0x01);  // 消息类型：verify
+
+        // 直接复制token数据
+        const size_t data_size = draft_tokens.size() * sizeof(llama_token);
+        binary_msg.resize(1 + data_size);
+        memcpy(binary_msg.data() + 1, draft_tokens.data(), data_size);
+
+        // 发送消息并等待响应
+        state.client.send(state.connection, binary_msg.data(), binary_msg.size(), websocketpp::frame::opcode::binary);
+
+        std::unique_lock<std::mutex> lock(state.mutex);
+        bool received = state.cv.wait_for(lock, std::chrono::milliseconds(timeout_ms), [&state] {
+            return !state.accepted_tokens.empty();
+        });
+
+        auto end = std::chrono::high_resolution_clock::now();
+        double verify_time = std::chrono::duration<double>(end - start).count();
+        state.verify_times.push_back(verify_time);
+
+        if (received) {
+            SRV_DBG("HeteroSpec: Verification completed in %.3fs\n", verify_time);
+            return true;
+        } else {
+            SRV_DBG("HeteroSpec: Verification timeout after %dms\n", timeout_ms);
+            return false;
+        }
+    } catch (const std::exception& e) {
+        SRV_ERR("HeteroSpec: Exception during verification: %s\n", e.what());
+        return false;
+    }
+}
+
 struct server_context {
     common_params params_base;
 
@@ -1899,6 +2143,12 @@ struct server_context {
 
             common_speculative_free(slot.spec);
             slot.spec = nullptr;
+            
+            // HeteroSpec: cleanup
+            if (slot.hetero_spec != nullptr) {
+                delete slot.hetero_spec;
+                slot.hetero_spec = nullptr;
+            }
 
             llama_batch_free(slot.batch_spec);
         }
@@ -2057,9 +2307,20 @@ struct server_context {
                 }
             }
 
+            // HeteroSpec: Initialize cloud collaborative speculative decoding
+            // Note: HeteroSpec parameters are handled per-request in slot_params, 
+            // so we initialize the state but don't connect until the first request
+            slot.hetero_spec = nullptr; // Will be initialized when needed
+
             SLT_INF(slot, "new slot n_ctx_slot = %d\n", slot.n_ctx);
 
             slot.params.sampling = params_base.sampling;
+            
+            // HeteroSpec: Set default heterospec parameters from main function params
+            slot.params.heterospec_enabled = params_base.heterospec_enabled;
+            slot.params.heterospec_server_url = params_base.heterospec_server_url;
+            slot.params.heterospec_n_draft = params_base.heterospec_n_draft;
+            slot.params.heterospec_timeout_ms = params_base.heterospec_timeout_ms;
 
             slot.callback_on_release = [this](int) {
                 queue_tasks.pop_deferred_task();
@@ -2722,6 +2983,7 @@ struct server_context {
             case SERVER_TASK_TYPE_INFILL:
             case SERVER_TASK_TYPE_EMBEDDING:
             case SERVER_TASK_TYPE_RERANK:
+            case SERVER_TASK_TYPE_HETEROSPEC_COMPLETION:
                 {
                     const int id_slot = task.id_selected_slot;
 
@@ -3512,6 +3774,164 @@ struct server_context {
                 }
             }
 
+            // HeteroSpec: do cloud collaborative speculative decoding
+            for (auto & slot : slots) {
+                if (!slot.is_processing() || slot.state != SLOT_STATE_GENERATING) {
+                    continue;
+                }
+
+                // Check if HeteroSpec is enabled for this slot
+                if (slot.params.heterospec_enabled && !slot.params.heterospec_server_url.empty()) {
+                    // Lazy initialization of HeteroSpec WebSocket connection
+                    if (slot.hetero_spec == nullptr) {
+                        slot.hetero_spec = new heterospec_state();
+                        slot.hetero_spec->server_url = slot.params.heterospec_server_url;
+                        if (heterospec_init_websocket(*slot.hetero_spec, slot.params.heterospec_server_url)) {
+                            slot.hetero_spec->is_enabled = true;
+                            SLT_INF(slot, "HeteroSpec enabled with server: %s\n", slot.params.heterospec_server_url.c_str());
+                        } else {
+                            SLT_WRN(slot, "Failed to initialize HeteroSpec WebSocket: %s", "");
+                            delete slot.hetero_spec;
+                            slot.hetero_spec = nullptr;
+                            continue; // Skip HeteroSpec for this iteration
+                        }
+                    }
+                    
+                    if (slot.hetero_spec && slot.hetero_spec->is_enabled) {
+                    if (mctx) {
+                        // we should never reach this, as speculative is automatically disabled if mmproj is loaded
+                        continue;
+                    }
+
+                    llama_token id = slot.sampled;
+                    
+                    // Initialize HeteroSpec state if this is the first generation token
+                    if (slot.hetero_spec->n_past == 0) {
+                        const llama_tokens & cached_text_tokens = slot.cache_tokens.get_text_tokens();
+                        slot.hetero_spec->prompt_tokens = cached_text_tokens;
+                        slot.hetero_spec->last_token = id;
+                        slot.hetero_spec->n_past = cached_text_tokens.size();
+                        
+                        // Send prefill to cloud server
+                        llama_tokens prefill_tokens(cached_text_tokens);
+                        prefill_tokens.push_back(id);
+                        if (!heterospec_send_prefill(*slot.hetero_spec, prefill_tokens)) {
+                            SLT_WRN(slot, "HeteroSpec: Failed to send prefill, falling back to local generation: %s", "");
+                            continue;
+                        }
+                        
+                        SLT_DBG(slot, "HeteroSpec: Prefill sent with %zu tokens\n", prefill_tokens.size());
+                    }
+
+                    // Generate local draft tokens using llama.cpp's speculative API
+                    auto start_draft = std::chrono::high_resolution_clock::now();
+                    
+                    struct common_speculative_params params_spec;
+                    params_spec.n_draft = slot.params.heterospec_n_draft;
+                    params_spec.n_reuse = llama_n_ctx(ctx) - slot.params.heterospec_n_draft;
+                    params_spec.p_min   = 0.0f;
+                    
+                    // Create a temporary speculative context for HeteroSpec
+                    if (!slot.spec && slot.ctx_dft) {
+                        slot.spec = common_speculative_init(slot.ctx_dft);
+                    }
+                    
+                    llama_tokens draft_tokens;
+                    if (slot.spec) {
+                        draft_tokens = common_speculative_gen_draft(slot.spec, params_spec, slot.hetero_spec->prompt_tokens, slot.hetero_spec->last_token);
+                    } else {
+                        // Fallback to simple sampling if no draft model available
+                        for (int i = 0; i < slot.params.heterospec_n_draft; ++i) {
+                            draft_tokens.push_back(common_sampler_sample(slot.smpl, ctx, -1));
+                        }
+                    }
+                    
+                    auto end_draft = std::chrono::high_resolution_clock::now();
+                    double draft_time = std::chrono::duration<double>(end_draft - start_draft).count();
+                    slot.hetero_spec->draft_times.push_back(draft_time);
+                    slot.hetero_spec->total_drafts++;
+
+                    if (!draft_tokens.empty()) {
+                        SLT_DBG(slot, "HeteroSpec: Generated %zu draft tokens in %.3fs\n", draft_tokens.size(), draft_time);
+                        
+                        // Send draft tokens to cloud for verification
+                        if (heterospec_send_verify_and_wait(*slot.hetero_spec, draft_tokens, slot.params.heterospec_timeout_ms)) {
+                            // Get accepted tokens from cloud
+                            std::unique_lock<std::mutex> lock(slot.hetero_spec->mutex);
+                            llama_tokens accepted_tokens = std::move(slot.hetero_spec->accepted_tokens);
+                            slot.hetero_spec->accepted_tokens.clear();
+                            lock.unlock();
+                            
+                            if (!accepted_tokens.empty()) {
+                                SLT_DBG(slot, "HeteroSpec: Cloud accepted %zu tokens\n", accepted_tokens.size());
+                                slot.hetero_spec->accepted_drafts++;
+                                
+                                // Update slot state with accepted tokens
+                                slot.hetero_spec->prompt_tokens.push_back(slot.hetero_spec->last_token);
+                                slot.hetero_spec->last_token = accepted_tokens.back();
+                                slot.hetero_spec->prompt_tokens.insert(slot.hetero_spec->prompt_tokens.end(), 
+                                                                      accepted_tokens.begin(), accepted_tokens.end() - 1);
+                                slot.hetero_spec->n_past += accepted_tokens.size();
+                                
+                                // Clear KV cache for future tokens
+                                llama_memory_seq_rm(llama_get_memory(ctx), slot.id, slot.n_past + 1, -1);
+                                
+                                // Process accepted tokens
+                                for (const auto& token : accepted_tokens) {
+                                    if (slot.n_remaining > 0) {
+                                        slot.n_remaining--;
+                                    }
+                                    
+                                    slot.n_past++;
+                                    slot.n_decoded++;
+                                    slot.cache_tokens.push_back(token);
+                                    
+                                    completion_token_output result;
+                                    result.tok = token;
+                                    result.text_to_send = common_token_to_piece(ctx, result.tok, accept_special_token(slot, result.tok));
+                                    result.prob = 1.0f;
+                                    
+                                    if (!process_token(result, slot)) {
+                                        // release slot because of stop condition
+                                        slot.release();
+                                        slot.print_timings();
+                                        send_final_response(slot);
+                                        metrics.on_prediction(slot);
+                                        
+                                        // Print HeteroSpec statistics
+                                        if (!slot.hetero_spec->draft_times.empty() && !slot.hetero_spec->verify_times.empty()) {
+                                            double avg_draft = 0.0, avg_verify = 0.0;
+                                            for (double t : slot.hetero_spec->draft_times) avg_draft += t;
+                                            for (double t : slot.hetero_spec->verify_times) avg_verify += t;
+                                            avg_draft /= slot.hetero_spec->draft_times.size();
+                                            avg_verify /= slot.hetero_spec->verify_times.size();
+                                            
+                                            SLT_INF(slot, "HeteroSpec Stats: Drafts=%d, Accepted=%d (%.1f%%), "
+                                                         "Avg Draft Time=%.3fs, Avg Verify Time=%.3fs\n",
+                                                    slot.hetero_spec->total_drafts, 
+                                                    slot.hetero_spec->accepted_drafts,
+                                                    100.0 * slot.hetero_spec->accepted_drafts / slot.hetero_spec->total_drafts,
+                                                    avg_draft, avg_verify);
+                                        }
+                                        break;
+                                    }
+                                }
+                                
+                                // Skip regular speculative decoding for this slot
+                                continue;
+                            }
+                        }
+                        
+                        SLT_DBG(slot, "HeteroSpec: Cloud verification failed or timeout, using single token: %s", "");
+                    }
+                    
+                    // Fallback: process single token normally
+                    slot.hetero_spec->last_token = id;
+                    // Continue to regular token processing...
+                    } // end if (slot.hetero_spec && slot.hetero_spec->is_enabled)
+                }
+            }
+
             // do speculative decoding
             for (auto & slot : slots) {
                 if (!slot.is_processing() || !slot.can_speculate()) {
@@ -3519,6 +3939,12 @@ struct server_context {
                 }
 
                 if (slot.state != SLOT_STATE_GENERATING) {
+                    continue;
+                }
+                
+                // Skip if HeteroSpec is handling this slot
+                if (slot.params.heterospec_enabled && !slot.params.heterospec_server_url.empty() && 
+                    slot.hetero_spec && slot.hetero_spec->is_enabled) {
                     continue;
                 }
 

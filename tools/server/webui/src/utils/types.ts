@@ -3,6 +3,14 @@ export interface TimingReport {
   prompt_ms: number;
   predicted_n: number;
   predicted_ms: number;
+  // HeteroSpec statistics (optional)
+  heterospec_stats?: {
+    total_drafts: number;
+    accepted_drafts: number;
+    avg_draft_time_ms: number;
+    avg_verify_time_ms: number;
+    acceptance_rate: number;
+  };
 }
 
 /**
@@ -133,6 +141,14 @@ export interface LlamaCppServerProps {
   modalities?: {
     vision: boolean;
     audio: boolean;
+  };
+  default_generation_settings?: {
+    heterospec_enabled?: boolean;
+    heterospec_server_url?: string;
+    heterospec_n_draft?: number;
+    heterospec_timeout_ms?: number;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    [key: string]: any; // Allow other generation settings
   };
   // TODO: support params
 }
