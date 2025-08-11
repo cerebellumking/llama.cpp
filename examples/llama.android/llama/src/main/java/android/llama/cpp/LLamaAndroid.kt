@@ -36,7 +36,7 @@ class LLamaAndroid {
         }
     }.asCoroutineDispatcher()
 
-    private val nlen: Int = 1536
+    private val nlen: Int = 256
     private var nativeStatePtr: Long = 0L
 
     private external fun log_to_android()
@@ -116,6 +116,7 @@ class LLamaAndroid {
         when (val state = threadLocalState.get()) {
             is State.Loaded -> {
                 val ncur = IntVar(heterospec_init(state.context, state.batch, message, formatChat, nlen, ""))
+                var promptLen = ncur.value
                 if(ncur.value < 0) {
                     Log.e(tag, "Heterospec init failed")
                     emit(Pair("Heterospec init failed", ncur.value))
@@ -123,8 +124,8 @@ class LLamaAndroid {
                 }
                 var totalTokens = 0
                 var curTokens = ncur.value
-                while (ncur.value <= nlen) {
-                    val str = heterospec_loop(state.context, nlen, ncur)
+                while (ncur.value <= promptLen + nlen) {
+                    val str = heterospec_loop(state.context, promptLen + nlen, ncur)
                     if (str == null) {
                         break
                     }

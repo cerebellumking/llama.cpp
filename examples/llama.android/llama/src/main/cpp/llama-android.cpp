@@ -628,7 +628,7 @@ Java_android_llama_cpp_LLamaAndroid_heterospec_1loop(
             websocketpp::frame::opcode::binary);
 
         std::unique_lock<std::mutex> lock(state->mutex);
-        if (state->cv.wait_for(lock, std::chrono::milliseconds(500), [state] {
+        if (state->cv.wait_for(lock, std::chrono::milliseconds(1000), [state] {
             return !state->accepted_tokens.empty();
         })) {
             auto end = std::chrono::high_resolution_clock::now();

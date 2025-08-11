@@ -70,6 +70,15 @@ import androidx.compose.ui.platform.LocalContext
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
+import androidx.compose.runtime.rememberCoroutineScope
+import org.json.JSONArray
+import org.json.JSONObject
+import java.io.BufferedReader
+import java.io.InputStreamReader
+import java.util.Locale
+import kotlin.coroutines.resume
 
 // 优化的配色方案
 object AppColors {
@@ -239,6 +248,9 @@ class MainActivity(
     fun pickImage() {
         pickImageLauncher.launch("image/*")
     }
+
+    // 提供 OCR 引擎给测试模式使用
+    fun ocrEngine(): OCR = ocr
 
     private fun checkCameraPermission() {
         when {
@@ -449,7 +461,7 @@ fun MainCompose(
             .background(AppColors.Background)
     ) {
         // 应用栏
-        AppBar(models, viewModel, dm)
+        AppBar(models, viewModel, dm, activity)
 
         // 性能监控显示 - 始终显示CPU利用率，推理时显示推理速度
         Box(
@@ -470,8 +482,40 @@ fun MainCompose(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.Center
             ) {
-                // 推理速度
-                if (viewModel.inferenceSpeed > 0) {
+                // 数据集整体速度/进度（测试模式）
+                if (viewModel.isTestRunning || viewModel.lastTestSpeed > 0) {
+                    Icon(
+                        imageVector = Icons.Default.Speed,
+                        contentDescription = "数据集速度",
+                        tint = AppColors.Primary,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    val speed = if (viewModel.isTestRunning) viewModel.datasetSpeed else viewModel.lastTestSpeed
+                    Text(
+                        text = "数据集速度: %.1f tokens/s".format(speed),
+                        color = AppColors.Primary,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Text(
+                        text = "进度: ${viewModel.testProcessed}/${viewModel.testTotal}",
+                        color = AppColors.Primary,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+
+                    Spacer(modifier = Modifier.width(16.dp))
+                    Box(
+                        modifier = Modifier
+                            .width(1.dp)
+                            .height(16.dp)
+                            .background(AppColors.Primary.copy(alpha = 0.3f))
+                    )
+                    Spacer(modifier = Modifier.width(16.dp))
+                } else if (viewModel.inferenceSpeed > 0) {
                     Icon(
                         imageVector = Icons.Default.Speed,
                         contentDescription = "推理速度",
@@ -610,13 +654,16 @@ fun MainCompose(
 fun AppBar(
     models: List<Downloadable>,
     viewModel: MainViewModel,
-    dm: DownloadManager
+    dm: DownloadManager,
+    activity: MainActivity
 ) {
     var showMenu by remember { mutableStateOf(false) }
     var downloadingModel by remember { mutableStateOf<Downloadable?>(null) }
     var downloadProgress by remember { mutableDoubleStateOf(0.0) }
     var downloadId by remember { mutableLongStateOf(-1L) }
     var currentModelName by remember { mutableStateOf("Qwen") }
+    var showTestDialog by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
 
     // 用于锚定DropdownMenu
     var buttonCoords by remember { mutableStateOf<androidx.compose.ui.geometry.Rect?>(null) }
@@ -669,6 +716,27 @@ fun AppBar(
         Row(
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier
+                .align(Alignment.CenterStart)
+                .padding(horizontal = 16.dp)
+        ) {
+            // 测试模式按钮（移动到左侧）
+            IconButton(
+                onClick = { showTestDialog = true },
+                modifier = Modifier.size(32.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.PlayArrow,
+                    contentDescription = "测试模式",
+                    tint = AppColors.TextWhite
+                )
+            }
+            // 左侧仅保留测试按钮
+        }
+
+        // 中间：标题 + 模型下拉（保持居中）
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier
                 .align(Alignment.Center)
                 .padding(horizontal = 16.dp)
         ) {
@@ -678,7 +746,6 @@ fun AppBar(
                 fontSize = 22.sp,
                 fontWeight = FontWeight.Bold
             )
-            Spacer(modifier = Modifier.width(8.dp))
             // 下拉按钮
             Box {
                 IconButton(
@@ -905,6 +972,21 @@ fun AppBar(
             androidx.compose.material3.Switch(
                 checked = viewModel.isCpuMonitorEnabled,
                 onCheckedChange = { enabled -> viewModel.updateCpuMonitorEnabled(enabled) }
+            )
+        }
+
+        // 测试模式对话框
+        if (showTestDialog) {
+            val context = LocalContext.current
+            TestDatasetDialog(
+                onDismiss = { showTestDialog = false },
+                onSelectDataset = { datasetName ->
+                    showTestDialog = false
+                    // 启动测试
+                    scope.launch {
+                        runDatasetTest(context, viewModel, datasetName, activity.ocrEngine())
+                    }
+                }
             )
         }
     }
@@ -1523,4 +1605,226 @@ fun OcrEditDialog(
             }
         }
     }
+}
+
+// ===== 测试模式实现 =====
+
+@Composable
+private fun TestDatasetDialog(
+    onDismiss: () -> Unit,
+    onSelectDataset: (String) -> Unit,
+) {
+    val context = LocalContext.current
+    val datasets = remember {
+        try {
+            context.assets.list("datasets")?.toList()?.sorted() ?: emptyList()
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+
+    Dialog(onDismissRequest = onDismiss) {
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            shape = RoundedCornerShape(12.dp),
+            colors = CardDefaults.cardColors(containerColor = AppColors.BackgroundSecondary)
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text("选择数据集", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary)
+                Spacer(modifier = Modifier.height(12.dp))
+                if (datasets.isEmpty()) {
+                    Text("未找到数据集（请将数据放入 assets/datasets）", color = AppColors.TextSecondary)
+                } else {
+                    LazyColumn(
+                        modifier = Modifier.heightIn(max = 300.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        items(datasets) { name ->
+                            Card(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { onSelectDataset(name) },
+                                shape = RoundedCornerShape(8.dp),
+                                colors = CardDefaults.cardColors(containerColor = AppColors.Background)
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(12.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Image,
+                                        contentDescription = null,
+                                        tint = AppColors.Primary,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text(name, color = AppColors.TextPrimary)
+                                }
+                            }
+                        }
+                    }
+                }
+                Spacer(modifier = Modifier.height(12.dp))
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    TextButton(onClick = onDismiss) { Text("取消") }
+                }
+            }
+        }
+    }
+}
+
+private suspend fun runDatasetTest(
+    context: Context,
+    viewModel: MainViewModel,
+    datasetName: String,
+    ocr: OCR,
+) {
+    // 判定数据集类型：目录中的图片，或单文件 json/csv/txt
+    val base = "datasets/$datasetName"
+    val entries = try { context.assets.list(base) } catch (_: Exception) { null }
+
+    val imageExts = setOf(".jpg", ".jpeg", ".png", ".webp", ".bmp")
+
+    if (entries != null && entries.isNotEmpty()) {
+        // 目录：假定为图片集合
+        val imageFiles = entries.filter { name ->
+            val lower = name.lowercase(Locale.ROOT)
+            imageExts.any { lower.endsWith(it) }
+        }.sorted()
+
+        viewModel.startTest(imageFiles.size)
+        for (file in imageFiles) {
+            try {
+                context.assets.open("$base/$file").use { input ->
+                    val bitmap = BitmapFactory.decodeStream(input)
+                    if (bitmap != null) {
+                        val text = runOcrSuspend(ocr, bitmap)
+                        viewModel.sendForTest_impl(text)
+                    } else {
+                        viewModel.sendForTest_impl("")
+                    }
+                }
+            } catch (e: Exception) {
+                viewModel.log("读取图片失败：${e.message}")
+                viewModel.sendForTest_impl("")
+            }
+        }
+        viewModel.finishTest()
+        return
+    }
+
+    // 单文件数据集
+    val candidates = listOf("$base.json", "$base.csv", "$base.txt")
+    var openedName: String? = null
+    for (c in candidates) {
+        try {
+            context.assets.open(c).close()
+            openedName = c
+            break
+        } catch (_: Exception) { }
+    }
+
+    if (openedName == null) {
+        viewModel.log("未识别的数据集：$datasetName")
+        return
+    }
+
+    val prompts: List<String> = when {
+        openedName.endsWith(".json") -> readPromptsFromJson(context, openedName)
+        openedName.endsWith(".csv") -> readPromptsFromCsv(context, openedName)
+        else -> readPromptsFromTxt(context, openedName)
+    }
+
+    viewModel.startTest(prompts.size)
+    for (p in prompts) {
+        viewModel.sendForTest_impl(p)
+    }
+    viewModel.finishTest()
+}
+
+private fun readPromptsFromTxt(context: Context, assetPath: String): List<String> =
+    try {
+        context.assets.open(assetPath).use { input ->
+            BufferedReader(InputStreamReader(input)).readLines().map { it.trim() }.filter { it.isNotEmpty() }
+        }
+    } catch (_: Exception) { emptyList() }
+
+private fun readPromptsFromCsv(context: Context, assetPath: String): List<String> =
+    try {
+        context.assets.open(assetPath).use { input ->
+            val lines = BufferedReader(InputStreamReader(input)).readLines()
+            if (lines.isEmpty()) return emptyList()
+            val header = lines.first().split(',')
+            val colIndex = header.indexOfFirst { it.equals("question", true) || it.equals("prompt", true) || it.equals("input", true) }
+            val rows = lines.drop(1)
+            rows.mapNotNull { row ->
+                val cols = row.split(',')
+                val value = if (colIndex in cols.indices) cols[colIndex] else cols.firstOrNull()
+                value?.trim()?.takeIf { it.isNotEmpty() }
+            }
+        }
+    } catch (_: Exception) { emptyList() }
+
+private fun readPromptsFromJson(context: Context, assetPath: String): List<String> =
+    try {
+        val text = context.assets.open(assetPath).use { input ->
+            BufferedReader(InputStreamReader(input)).readText()
+        }
+        val arr = JSONArray(text)
+        val result = mutableListOf<String>()
+        for (i in 0 until arr.length()) {
+            val el = arr.get(i)
+            when (el) {
+                is JSONObject -> {
+                    val v = el.optString("question",
+                        el.optString("prompt",
+                            el.optString("input", "")
+                        )
+                    )
+                    if (v.isNotBlank()) result += v
+                }
+                is String -> if (el.isNotBlank()) result += el
+            }
+        }
+        result
+    } catch (_: Exception) { emptyList() }
+
+private suspend fun runOcrSuspend(ocr: OCR, bitmap: Bitmap): String =
+    suspendCancellableCoroutine { cont ->
+        try {
+            ocr.run(bitmap, object : OcrRunCallback {
+                override fun onSuccess(result: OcrResult) {
+                    val cleaned = cleanOcrText(result.simpleText)
+                    cont.resume(cleaned)
+                }
+
+                override fun onFail(e: Throwable) {
+                    cont.resume("")
+                }
+            })
+        } catch (_: Exception) {
+            cont.resume("")
+        }
+    }
+
+private fun cleanOcrText(allText: String): String {
+    return allText
+        .replace(Regex("""\s*(?:[\u4e00-\u9fa5]{1,6})?(医师|医生|技师)[:：]?\s*[\u4e00-\u9fa5]{2,4}""")) { _ -> "" }
+        .replace(Regex("""名[:：]?\s*[\u4e00-\u9fa5]{2,4}"""), "")
+        .replace(Regex("""号[:：]?\s*\d+"""), "")
+        .replace(Regex("""姓名[:：]?\s*[\u4e00-\u9fa5]{2,4}"""), "")
+        .replace(Regex("""患者[:：]?\s*[\u4e00-\u9fa5]{2,4}"""), "")
+        .replace(Regex("\n+"), " ")
+        .replace(Regex("\\d{17}[\\dXx]"), "")
+        .replace(Regex("1[3-9]\\d{9}"), "")
+        .replace(Regex("地址[:：]?[\\u4e00-\\u9fa5A-Za-z0-9\\-]{4,}"), "")
+        .replace(Regex("[\\u4e00-\\u9fa5]{2,20}医院"), "")
+        .replace(Regex("\\s+"), " ")
+        .replace(Regex("[^\\p{L}\\p{N}\\p{P}\\s]"), "")
+        .replace("姓", "")
+        .trim()
 }

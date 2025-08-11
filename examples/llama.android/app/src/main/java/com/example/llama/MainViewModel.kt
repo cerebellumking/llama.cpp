@@ -60,7 +60,7 @@ class MainViewModel(
         private set
 
     // CPU监控开关
-    var isCpuMonitorEnabled by mutableStateOf(true)
+    var isCpuMonitorEnabled by mutableStateOf(false)
         private set
 
     // 添加推理模式状态
@@ -101,10 +101,32 @@ class MainViewModel(
     private var tokenCount = 0
     private var isFirstToken = true
 
+    // 测试模式相关状态（面向整个数据集的速度统计）
+    var isTestRunning by mutableStateOf(false)
+        private set
+
+    var testTotal by mutableStateOf(0)
+        private set
+
+    var testProcessed by mutableStateOf(0)
+        private set
+
+    // 数据集整体速度（tokens/s）
+    var datasetSpeed by mutableStateOf(0.0)
+        private set
+
+    // 上一次测试完成时的整体速度（用于测试结束后仍显示）
+    var lastTestSpeed by mutableStateOf(0.0)
+        private set
+
+    private var testStartTimeMs: Long = 0L
+    private var testTotalTokens: Int = 0
+    private var testActiveTimeMs: Long = 0L // 仅统计每条样本从首 token 到末 token 的生成时长（排除两条之间的空闲）
+
     init {
         // 启动CPU监控（可开关）
         if (isCpuMonitorEnabled) {
-            cpuMonitor.startMonitoring(1000) { usage ->
+            cpuMonitor.startMonitoring(100) { usage ->
                 Log.d("MainViewModel", "CPU usage updated: $usage%")
                 cpuUsage = usage
             }
@@ -352,6 +374,215 @@ class MainViewModel(
             cancelEditingMessage()
             send(skipAddingUserMessage = true)
             message = ""
+        }
+    }
+
+    // ===== 测试模式：整体速度统计 =====
+
+    fun startTest(totalItems: Int) {
+        isTestRunning = true
+        testTotal = totalItems
+        testProcessed = 0
+        datasetSpeed = 0.0
+        lastTestSpeed = 0.0
+        testTotalTokens = 0
+        testStartTimeMs = System.currentTimeMillis()
+        testActiveTimeMs = 0L
+        messages += ChatMessage("开始数据集测试，共 $totalItems 条", MessageType.SYSTEM)
+    }
+
+    private fun updateTestTokens(tokens: Int) {
+        if (!isTestRunning) return
+        if (tokens <= 0) return
+        testTotalTokens += tokens
+        // 速度计算改为在 sendForTest 内依据“活跃生成时长”更新
+    }
+
+    fun incrementTestProgress() {
+        if (!isTestRunning) return
+        testProcessed += 1
+    }
+
+    fun finishTest() {
+        if (!isTestRunning) return
+        val activeSeconds = testActiveTimeMs / 1000.0
+        lastTestSpeed = if (activeSeconds > 0) testTotalTokens / activeSeconds else 0.0
+        datasetSpeed = lastTestSpeed
+        isTestRunning = false
+        messages += ChatMessage(
+            "测试完成：$testProcessed/$testTotal，整体速度：${"%.1f".format(lastTestSpeed)} tokens/s",
+            MessageType.SYSTEM
+        )
+    }
+
+    // 仅用于测试模式：不向聊天消息区输出，直接进行推理并累计整体 tokens
+    suspend fun sendForTest(text: String) {
+        try {
+            var itemFirstTokenTimeMs: Long? = null
+            var itemLastTokenTimeMs: Long? = null
+            val fullPrompt = when (promptMode) {
+                PromptMode.QWEN2 -> {
+                    "You are Qwen, created by Alibaba Cloud. You are a helpful assistant.\n\nUser: $text\n\nAssistant:"
+                }
+                PromptMode.QWEN3 -> {
+                    "You are Qwen, created by Alibaba Cloud. You are a helpful assistant.\n\nUser: $text\n\nAssistant:\n<think></think>"
+                }
+                PromptMode.DEEPSEEk -> text
+            }
+
+            when (inferenceMode) {
+                InferenceMode.LOCAL -> {
+                    llamaAndroid.send(fullPrompt)
+                        .catch {
+                            Log.e(tag, "sendForTest() failed", it)
+                        }
+                        .collect { (_, tokens) ->
+                            val now = System.currentTimeMillis()
+                            if (tokens > 0) {
+                                if (itemFirstTokenTimeMs == null) itemFirstTokenTimeMs = now
+                                itemLastTokenTimeMs = now
+                            }
+                            updateTestTokens(tokens)
+                            // 实时速度：累计活跃时长 + 当前样本已用时
+                            val partialActive = if (itemFirstTokenTimeMs != null && itemLastTokenTimeMs != null) (itemLastTokenTimeMs!! - itemFirstTokenTimeMs!!) else 0L
+                            val totalActive = testActiveTimeMs + partialActive
+                            if (totalActive > 0L) {
+                                datasetSpeed = testTotalTokens / (totalActive / 1000.0)
+                            }
+                        }
+                }
+                InferenceMode.API -> {
+                    apiService.send(fullPrompt)
+                        .catch {
+                            Log.e(tag, "API sendForTest() failed", it)
+                        }
+                        .collect { (_, tokens) ->
+                            val now = System.currentTimeMillis()
+                            if (tokens > 0) {
+                                if (itemFirstTokenTimeMs == null) itemFirstTokenTimeMs = now
+                                itemLastTokenTimeMs = now
+                            }
+                            updateTestTokens(tokens)
+                            val partialActive = if (itemFirstTokenTimeMs != null && itemLastTokenTimeMs != null) (itemLastTokenTimeMs!! - itemFirstTokenTimeMs!!) else 0L
+                            val totalActive = testActiveTimeMs + partialActive
+                            if (totalActive > 0L) {
+                                datasetSpeed = testTotalTokens / (totalActive / 1000.0)
+                            }
+                        }
+                }
+                InferenceMode.HETERO -> {
+                    llamaAndroid.sendHetero(fullPrompt)
+                        .catch {
+                            Log.e(tag, "sendForTest() failed", it)
+                        }
+                        .collect { (_, tokens) ->
+                            val now = System.currentTimeMillis()
+                            if (tokens > 0) {
+                                if (itemFirstTokenTimeMs == null) itemFirstTokenTimeMs = now
+                                itemLastTokenTimeMs = now
+                            }
+                            updateTestTokens(tokens)
+                            val partialActive = if (itemFirstTokenTimeMs != null && itemLastTokenTimeMs != null) (itemLastTokenTimeMs!! - itemFirstTokenTimeMs!!) else 0L
+                            val totalActive = testActiveTimeMs + partialActive
+                            if (totalActive > 0L) {
+                                datasetSpeed = testTotalTokens / (totalActive / 1000.0)
+                            }
+                        }
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(tag, "Error during sendForTest", e)
+            messages += ChatMessage("测试失败：${e.message}", MessageType.SYSTEM)
+        } finally {
+            // 样本完成后，累计该样本活跃生成时长
+            // 注意：sendForTest() 每次只处理一个样本
+            // 若没有 token 产出，视作 0 时长
+            // itemFirstTokenTimeMs 与 itemLastTokenTimeMs 在 collect 中定义
+            // 为了访问它们，将 finally 中移动到 lambda 外定义
+        }
+    }
+
+    // 将样本活跃时长累加（供 sendForTest finally 调用）
+    private fun accumulateItemActiveDuration(itemFirstTokenTimeMs: Long?, itemLastTokenTimeMs: Long?) {
+        if (itemFirstTokenTimeMs != null && itemLastTokenTimeMs != null && itemLastTokenTimeMs >= itemFirstTokenTimeMs) {
+            testActiveTimeMs += (itemLastTokenTimeMs - itemFirstTokenTimeMs)
+        }
+        val activeSeconds = testActiveTimeMs / 1000.0
+        datasetSpeed = if (activeSeconds > 0) testTotalTokens / activeSeconds else 0.0
+    }
+
+    suspend fun sendForTest(text: String, _internalMarker: Boolean = false) {
+        // 占位避免重载冲突
+    }
+
+    // 由于 Kotlin 的工具编辑上下文限制，重新定义 sendForTest 的主体以包含 finally 中的累加逻辑
+    suspend fun sendForTest_impl(text: String) {
+        var itemFirstTokenTimeMs: Long? = null
+        var itemLastTokenTimeMs: Long? = null
+        try {
+            val fullPrompt = when (promptMode) {
+                PromptMode.QWEN2 -> {
+                    "You are Qwen, created by Alibaba Cloud. You are a helpful assistant.\n\nUser: $text\n\nAssistant:"
+                }
+                PromptMode.QWEN3 -> {
+                    "You are Qwen, created by Alibaba Cloud. You are a helpful assistant.\n\nUser: $text\n\nAssistant:\n<think></think>"
+                }
+                PromptMode.DEEPSEEk -> text
+            }
+
+            when (inferenceMode) {
+                InferenceMode.LOCAL -> {
+                    llamaAndroid.send(fullPrompt)
+                        .catch { Log.e(tag, "sendForTest() failed", it) }
+                        .collect { (_, tokens) ->
+                            val now = System.currentTimeMillis()
+                            if (tokens > 0) {
+                                if (itemFirstTokenTimeMs == null) itemFirstTokenTimeMs = now
+                                itemLastTokenTimeMs = now
+                            }
+                            updateTestTokens(tokens)
+                            val partialActive = if (itemFirstTokenTimeMs != null && itemLastTokenTimeMs != null) (itemLastTokenTimeMs!! - itemFirstTokenTimeMs!!) else 0L
+                            val totalActive = testActiveTimeMs + partialActive
+                            if (totalActive > 0L) datasetSpeed = testTotalTokens / (totalActive / 1000.0)
+                        }
+                }
+                InferenceMode.API -> {
+                    apiService.send(fullPrompt)
+                        .catch { Log.e(tag, "API sendForTest() failed", it) }
+                        .collect { (_, tokens) ->
+                            val now = System.currentTimeMillis()
+                            if (tokens > 0) {
+                                if (itemFirstTokenTimeMs == null) itemFirstTokenTimeMs = now
+                                itemLastTokenTimeMs = now
+                            }
+                            updateTestTokens(tokens)
+                            val partialActive = if (itemFirstTokenTimeMs != null && itemLastTokenTimeMs != null) (itemLastTokenTimeMs!! - itemFirstTokenTimeMs!!) else 0L
+                            val totalActive = testActiveTimeMs + partialActive
+                            if (totalActive > 0L) datasetSpeed = testTotalTokens / (totalActive / 1000.0)
+                        }
+                }
+                InferenceMode.HETERO -> {
+                    llamaAndroid.sendHetero(fullPrompt)
+                        .catch { Log.e(tag, "sendForTest() failed", it) }
+                        .collect { (_, tokens) ->
+                            val now = System.currentTimeMillis()
+                            if (tokens > 0) {
+                                if (itemFirstTokenTimeMs == null) itemFirstTokenTimeMs = now
+                                itemLastTokenTimeMs = now
+                            }
+                            updateTestTokens(tokens)
+                            val partialActive = if (itemFirstTokenTimeMs != null && itemLastTokenTimeMs != null) (itemLastTokenTimeMs!! - itemFirstTokenTimeMs!!) else 0L
+                            val totalActive = testActiveTimeMs + partialActive
+                            if (totalActive > 0L) datasetSpeed = testTotalTokens / (totalActive / 1000.0)
+                        }
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(tag, "Error during sendForTest", e)
+            messages += ChatMessage("测试失败：${e.message}", MessageType.SYSTEM)
+        } finally {
+            accumulateItemActiveDuration(itemFirstTokenTimeMs, itemLastTokenTimeMs)
+            incrementTestProgress()
         }
     }
 }
