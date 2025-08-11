@@ -451,36 +451,78 @@ fun MainCompose(
         // 应用栏
         AppBar(models, viewModel, dm)
 
-        // 推理速度显示
-        if (viewModel.inferenceSpeed > 0) {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(
-                        brush = Brush.horizontalGradient(
-                            colors = listOf(
-                                AppColors.Primary.copy(alpha = 0.12f),
-                                AppColors.PrimaryLight.copy(alpha = 0.08f)
-                            )
+        // 性能监控显示 - 始终显示CPU利用率，推理时显示推理速度
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(
+                    brush = Brush.horizontalGradient(
+                        colors = listOf(
+                            AppColors.Primary.copy(alpha = 0.12f),
+                            AppColors.PrimaryLight.copy(alpha = 0.08f)
                         )
                     )
-                    .padding(horizontal = 16.dp, vertical = 12.dp),
-                contentAlignment = Alignment.Center
+                )
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.Center
             ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.Center
-                ) {
+                // 推理速度
+                if (viewModel.inferenceSpeed > 0) {
                     Icon(
                         imageVector = Icons.Default.Speed,
                         contentDescription = "推理速度",
                         tint = AppColors.Primary,
                         modifier = Modifier.size(16.dp)
                     )
-                    Spacer(modifier = Modifier.width(8.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
                     Text(
                         text = "推理速度: %.1f tokens/s".format(viewModel.inferenceSpeed),
                         color = AppColors.Primary,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+
+                    // 分隔符
+                    Spacer(modifier = Modifier.width(16.dp))
+                    Box(
+                        modifier = Modifier
+                            .width(1.dp)
+                            .height(16.dp)
+                            .background(AppColors.Primary.copy(alpha = 0.3f))
+                    )
+                    Spacer(modifier = Modifier.width(16.dp))
+                }
+
+                // 应用CPU使用率 或 关闭提示
+                if (viewModel.isCpuMonitorEnabled) {
+                    Icon(
+                        imageVector = Icons.Default.Memory,
+                        contentDescription = "CPU使用率",
+                        tint = AppColors.Primary,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = "CPU使用率: %.1f%%".format(viewModel.cpuUsage),
+                        color = AppColors.Primary,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                } else {
+                    Icon(
+                        imageVector = Icons.Default.Memory,
+                        contentDescription = "CPU监控关闭",
+                        tint = AppColors.Primary.copy(alpha = 0.6f),
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = "CPU监控: 已关闭",
+                        color = AppColors.Primary.copy(alpha = 0.8f),
                         fontSize = 14.sp,
                         fontWeight = FontWeight.Medium
                     )
@@ -845,6 +887,25 @@ fun AppBar(
                     }
                 }
             }
+        }
+
+        // 右侧 CPU 监控开关（不改变标题位置）
+        Row(
+            modifier = Modifier
+                .align(Alignment.CenterEnd)
+                .padding(end = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Text(
+                text = "CPU监控",
+                color = AppColors.TextWhite,
+                fontSize = 12.sp
+            )
+            androidx.compose.material3.Switch(
+                checked = viewModel.isCpuMonitorEnabled,
+                onCheckedChange = { enabled -> viewModel.updateCpuMonitorEnabled(enabled) }
+            )
         }
     }
 }

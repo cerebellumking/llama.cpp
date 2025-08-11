@@ -55,6 +55,14 @@ class MainViewModel(
     var inferenceSpeed by mutableStateOf(0.0)
         private set
 
+    // 添加CPU利用率状态
+    var cpuUsage by mutableStateOf(0.0f)
+        private set
+
+    // CPU监控开关
+    var isCpuMonitorEnabled by mutableStateOf(true)
+        private set
+
     // 添加推理模式状态
     var inferenceMode by mutableStateOf(InferenceMode.LOCAL)
         private set
@@ -78,9 +86,12 @@ class MainViewModel(
 
     var editingMessageIndex by mutableStateOf(-1)
         private set
-    
+
     var editingText by mutableStateOf("")
         private set
+
+    // CPU监控器
+    private val cpuMonitor = CpuMonitor()
 
     // 获取当前API服务实例
     private val apiService: ApiService
@@ -90,8 +101,21 @@ class MainViewModel(
     private var tokenCount = 0
     private var isFirstToken = true
 
+    init {
+        // 启动CPU监控（可开关）
+        if (isCpuMonitorEnabled) {
+            cpuMonitor.startMonitoring(1000) { usage ->
+                Log.d("MainViewModel", "CPU usage updated: $usage%")
+                cpuUsage = usage
+            }
+        }
+    }
+
     override fun onCleared() {
         super.onCleared()
+
+        // 停止CPU监控
+        cpuMonitor.stopMonitoring()
 
         viewModelScope.launch {
             try {
@@ -99,6 +123,20 @@ class MainViewModel(
             } catch (exc: IllegalStateException) {
                 messages += ChatMessage(exc.message!!, MessageType.SYSTEM)
             }
+        }
+    }
+
+    fun updateCpuMonitorEnabled(enabled: Boolean) {
+        if (enabled == isCpuMonitorEnabled) return
+        isCpuMonitorEnabled = enabled
+        if (enabled) {
+            cpuMonitor.startMonitoring(1000) { usage ->
+                Log.d("MainViewModel", "CPU usage updated: $usage%")
+                cpuUsage = usage
+            }
+        } else {
+            cpuMonitor.stopMonitoring()
+            cpuUsage = 0.0f
         }
     }
 
@@ -294,21 +332,21 @@ class MainViewModel(
         editingMessageIndex = index
         editingText = content
     }
-    
+
     fun cancelEditingMessage() {
         editingMessageIndex = -1
         editingText = ""
     }
-    
+
     fun updateEditingText(text: String) {
         editingText = text
     }
-    
+
     fun confirmEditMessage() {
         if (editingMessageIndex >= 0 && editingText.isNotBlank()) {
             // 添加新的用户消息，而不是覆盖原消息
             messages += ChatMessage(editingText, MessageType.USER)
-            
+
             // 发送编辑后的消息
             message = editingText
             cancelEditingMessage()
