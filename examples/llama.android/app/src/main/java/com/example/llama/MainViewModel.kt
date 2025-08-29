@@ -63,6 +63,18 @@ class MainViewModel(
     var isCpuMonitorEnabled by mutableStateOf(false)
         private set
 
+    // 推理期间 CPU 采样（平均值 = 累加 / 次数）
+    var isInferenceRunning by mutableStateOf(false)
+        private set
+    private var cpuSampleSum = 0.0f
+    private var cpuSampleCount = 0
+
+    // 测试模式下：数据集级别 CPU 采样（平均值 = 累加 / 次数）
+    private var datasetCpuSampleSum = 0.0f
+    private var datasetCpuSampleCount = 0
+    var datasetCpuAvg by mutableStateOf(0.0f)
+        private set
+
     // 添加推理模式状态
     var inferenceMode by mutableStateOf(InferenceMode.LOCAL)
         private set
@@ -126,9 +138,18 @@ class MainViewModel(
     init {
         // 启动CPU监控（可开关）
         if (isCpuMonitorEnabled) {
-            cpuMonitor.startMonitoring(100) { usage ->
+            cpuMonitor.startMonitoring(50) { usage ->
                 Log.d("MainViewModel", "CPU usage updated: $usage%")
-                cpuUsage = usage
+                if (isTestRunning) {
+                    datasetCpuSampleSum += usage
+                    datasetCpuSampleCount += 1
+                    datasetCpuAvg = if (datasetCpuSampleCount > 0) datasetCpuSampleSum / datasetCpuSampleCount else 0.0f
+                    cpuUsage = datasetCpuAvg
+                } else if (isInferenceRunning) {
+                    cpuSampleSum += usage
+                    cpuSampleCount += 1
+                    cpuUsage = if (cpuSampleCount > 0) cpuSampleSum / cpuSampleCount else 0.0f
+                }
             }
         }
     }
@@ -152,14 +173,34 @@ class MainViewModel(
         if (enabled == isCpuMonitorEnabled) return
         isCpuMonitorEnabled = enabled
         if (enabled) {
-            cpuMonitor.startMonitoring(1000) { usage ->
+            cpuMonitor.startMonitoring(50) { usage ->
                 Log.d("MainViewModel", "CPU usage updated: $usage%")
-                cpuUsage = usage
+                if (isTestRunning) {
+                    datasetCpuSampleSum += usage
+                    datasetCpuSampleCount += 1
+                    datasetCpuAvg = if (datasetCpuSampleCount > 0) datasetCpuSampleSum / datasetCpuSampleCount else 0.0f
+                    cpuUsage = datasetCpuAvg
+                } else if (isInferenceRunning) {
+                    cpuSampleSum += usage
+                    cpuSampleCount += 1
+                    cpuUsage = if (cpuSampleCount > 0) cpuSampleSum / cpuSampleCount else 0.0f
+                }
             }
         } else {
             cpuMonitor.stopMonitoring()
             cpuUsage = 0.0f
         }
+    }
+
+    private fun beginInferenceMonitoring() {
+        isInferenceRunning = true
+        cpuSampleSum = 0.0f
+        cpuSampleCount = 0
+        cpuUsage = 0.0f
+    }
+
+    private fun endInferenceMonitoring() {
+        isInferenceRunning = false
     }
 
     fun send(skipAddingUserMessage: Boolean = false) {
@@ -183,6 +224,7 @@ class MainViewModel(
         inferenceSpeed = 0.0
         isFirstToken = true
 
+        beginInferenceMonitoring()
         viewModelScope.launch {
             // 构建完整的对话历史，包含系统提示词
 
@@ -242,6 +284,8 @@ class MainViewModel(
             } catch (e: Exception) {
                 Log.e(tag, "Error during inference", e)
                 messages += ChatMessage("Error: ${e.message}", MessageType.SYSTEM)
+            } finally {
+                endInferenceMonitoring()
             }
         }
     }
@@ -388,6 +432,12 @@ class MainViewModel(
         testTotalTokens = 0
         testStartTimeMs = System.currentTimeMillis()
         testActiveTimeMs = 0L
+        // 重置数据集级别 CPU 采样
+        datasetCpuSampleSum = 0.0f
+        datasetCpuSampleCount = 0
+        datasetCpuAvg = 0.0f
+        // 清零展示值，后续由采样回调实时更新数据集平均
+        cpuUsage = 0.0f
         messages += ChatMessage("开始数据集测试，共 $totalItems 条", MessageType.SYSTEM)
     }
 
@@ -410,7 +460,7 @@ class MainViewModel(
         datasetSpeed = lastTestSpeed
         isTestRunning = false
         messages += ChatMessage(
-            "测试完成：$testProcessed/$testTotal，整体速度：${"%.1f".format(lastTestSpeed)} tokens/s",
+            "测试完成：$testProcessed/$testTotal，整体速度：${"%.2f".format(lastTestSpeed)} tokens/s",
             MessageType.SYSTEM
         )
     }
@@ -517,6 +567,7 @@ class MainViewModel(
 
     // 由于 Kotlin 的工具编辑上下文限制，重新定义 sendForTest 的主体以包含 finally 中的累加逻辑
     suspend fun sendForTest_impl(text: String) {
+        beginInferenceMonitoring()
         var itemFirstTokenTimeMs: Long? = null
         var itemLastTokenTimeMs: Long? = null
         try {
@@ -583,6 +634,7 @@ class MainViewModel(
         } finally {
             accumulateItemActiveDuration(itemFirstTokenTimeMs, itemLastTokenTimeMs)
             incrementTestProgress()
+            endInferenceMonitoring()
         }
     }
 }

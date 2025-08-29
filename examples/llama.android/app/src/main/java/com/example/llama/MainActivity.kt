@@ -493,7 +493,7 @@ fun MainCompose(
                     Spacer(modifier = Modifier.width(6.dp))
                     val speed = if (viewModel.isTestRunning) viewModel.datasetSpeed else viewModel.lastTestSpeed
                     Text(
-                        text = "数据集速度: %.1f tokens/s".format(speed),
+                        text = "数据集速度: %.2f tokens/s".format(speed),
                         color = AppColors.Primary,
                         fontSize = 14.sp,
                         fontWeight = FontWeight.Medium
@@ -524,7 +524,7 @@ fun MainCompose(
                     )
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
-                        text = "推理速度: %.1f tokens/s".format(viewModel.inferenceSpeed),
+                        text = "推理速度: %.2f tokens/s".format(viewModel.inferenceSpeed),
                         color = AppColors.Primary,
                         fontSize = 14.sp,
                         fontWeight = FontWeight.Medium
@@ -551,7 +551,7 @@ fun MainCompose(
                     )
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
-                        text = "CPU使用率: %.1f%%".format(viewModel.cpuUsage),
+                        text = "CPU使用率: %.2f%%".format(viewModel.cpuUsage),
                         color = AppColors.Primary,
                         fontSize = 14.sp,
                         fontWeight = FontWeight.Medium

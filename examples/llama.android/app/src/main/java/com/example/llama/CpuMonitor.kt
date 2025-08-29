@@ -28,7 +28,7 @@ class CpuMonitor {
      * @param intervalMs 监控间隔时间（毫秒）
      * @param callback CPU使用率更新回调，参数为CPU使用率百分比（0.0-100.0）
      */
-    fun startMonitoring(intervalMs: Long = 1000, callback: (Float) -> Unit) {
+    fun startMonitoring(intervalMs: Long = 50, callback: (Float) -> Unit) {
         if (isMonitoring) {
             stopMonitoring()
         }
