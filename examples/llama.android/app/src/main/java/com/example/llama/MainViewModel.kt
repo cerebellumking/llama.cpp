@@ -138,7 +138,7 @@ class MainViewModel(
     init {
         // 启动CPU监控（可开关）
         if (isCpuMonitorEnabled) {
-            cpuMonitor.startMonitoring(50) { usage ->
+            cpuMonitor.startMonitoring(100) { usage ->
                 Log.d("MainViewModel", "CPU usage updated: $usage%")
                 if (isTestRunning) {
                     datasetCpuSampleSum += usage
@@ -173,7 +173,7 @@ class MainViewModel(
         if (enabled == isCpuMonitorEnabled) return
         isCpuMonitorEnabled = enabled
         if (enabled) {
-            cpuMonitor.startMonitoring(50) { usage ->
+            cpuMonitor.startMonitoring(100) { usage ->
                 Log.d("MainViewModel", "CPU usage updated: $usage%")
                 if (isTestRunning) {
                     datasetCpuSampleSum += usage
