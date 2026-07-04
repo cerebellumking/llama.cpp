@@ -1,275 +1,1830 @@
 package com.example.llama
 
+import android.Manifest
+import android.app.ActivityManager
+import android.app.DownloadManager
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Bundle
-import android.util.Log
-import android.widget.EditText
-import android.widget.TextView
-import android.widget.Toast
-import androidx.activity.addCallback
-import androidx.activity.enableEdgeToEdge
+import android.os.StrictMode
+import android.os.StrictMode.VmPolicy
+import android.provider.MediaStore
+import android.text.format.Formatter
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.appcompat.app.AppCompatActivity
-import androidx.lifecycle.lifecycleScope
-import androidx.recyclerview.widget.LinearLayoutManager
-import androidx.recyclerview.widget.RecyclerView
-import com.arm.aichat.AiChat
-import com.arm.aichat.InferenceEngine
-import com.arm.aichat.gguf.GgufMetadata
-import com.arm.aichat.gguf.GgufMetadataReader
-import com.google.android.material.floatingactionbutton.FloatingActionButton
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.flow.onCompletion
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
+import androidx.activity.viewModels
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.*
+import androidx.compose.material3.*
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.core.content.ContextCompat
+import androidx.core.content.getSystemService
+import androidx.core.net.toUri
+import com.example.llama.api.ApiType
+import com.example.llama.ui.theme.LlamaAndroidTheme
 import java.io.File
 import java.io.FileOutputStream
-import java.io.InputStream
-import java.util.UUID
+import kotlinx.coroutines.delay
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.unit.DpOffset
+import androidx.compose.ui.platform.LocalDensity
+import dev.jeziellago.compose.markdowntext.MarkdownText
+import androidx.compose.runtime.snapshotFlow
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.isActive
+import com.equationl.paddleocr4android.CpuPowerMode
+import com.equationl.paddleocr4android.OCR
+import com.equationl.paddleocr4android.OcrConfig
+import com.equationl.paddleocr4android.bean.OcrResult
+import com.equationl.paddleocr4android.callback.OcrInitCallback
+import com.equationl.paddleocr4android.callback.OcrRunCallback
+import com.canhub.cropper.CropImageContract
+import com.canhub.cropper.CropImageContractOptions
+import com.canhub.cropper.CropImageOptions
+import androidx.compose.ui.platform.LocalContext
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
+import androidx.compose.runtime.rememberCoroutineScope
+import org.json.JSONArray
+import org.json.JSONObject
+import java.io.BufferedReader
+import java.io.InputStreamReader
+import java.util.Locale
+import kotlin.coroutines.resume
 
-class MainActivity : AppCompatActivity() {
+// 优化的配色方案
+object AppColors {
+    // 主色调 - 优雅的蓝色系
+    val Primary = Color(0xFF2B7DE9)
+    val PrimaryLight = Color(0xFF4A90FF)
 
-    // Android views
-    private lateinit var ggufTv: TextView
-    private lateinit var messagesRv: RecyclerView
-    private lateinit var userInputEt: EditText
-    private lateinit var userActionFab: FloatingActionButton
+    // 背景色 - 现代化渐变
+    val Background = Color(0xFFF7F9FC)
+    val BackgroundSecondary = Color(0xFFFFFFFF)
 
-    // Arm AI Chat inference engine
-    private lateinit var engine: InferenceEngine
-    private var generationJob: Job? = null
+    // 聊天气泡
+    val UserBubble = Color(0xFF2B7DE9)
+    val AIBubble = Color(0xFFFFFFFF)
 
-    // Conversation states
-    private var isModelReady = false
-    private val messages = mutableListOf<Message>()
-    private val lastAssistantMsg = StringBuilder()
-    private val messageAdapter = MessageAdapter(messages)
+    // 文本颜色
+    val TextPrimary = Color(0xFF1A1A1A)
+    val TextSecondary = Color(0xFF6B7280)
+    val TextWhite = Color(0xFFFFFFFF)
+    val TextMuted = Color(0xFF9CA3AF)
 
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
-        setContentView(R.layout.activity_main)
-        // View model boilerplate and state management is out of this basic sample's scope
-        onBackPressedDispatcher.addCallback { Log.w(TAG, "Ignore back press for simplicity") }
+    // 输入框
+    val InputBackground = Color(0xFFFFFFFF)
+    val InputBorder = Color(0xFFE5E7EB)
+    val InputBorderFocused = Color(0xFF2B7DE9)
 
-        // Find views
-        ggufTv = findViewById(R.id.gguf)
-        messagesRv = findViewById(R.id.messages)
-        messagesRv.layoutManager = LinearLayoutManager(this).apply { stackFromEnd = true }
-        messagesRv.adapter = messageAdapter
-        userInputEt = findViewById(R.id.user_input)
-        userActionFab = findViewById(R.id.fab)
+    // 应用栏 - 优雅的渐变蓝色
+    val AppBarBackground = Color(0xFF2B7DE9)
+    val AppBarBackgroundSecondary = Color(0xFF4A90FF)
 
-        // Arm AI Chat initialization
-        lifecycleScope.launch(Dispatchers.Default) {
-            engine = AiChat.getInferenceEngine(applicationContext)
-        }
+    // 分割线
+    val Divider = Color(0xFFE5E7EB)
+}
 
-        // Upon CTA button tapped
-        userActionFab.setOnClickListener {
-            if (isModelReady) {
-                // If model is ready, validate input and send to engine
-                handleUserInput()
-            } else {
-                // Otherwise, prompt user to select a GGUF metadata on the device
-                getContent.launch(arrayOf("*/*"))
-            }
-        }
-    }
-
-    private val getContent = registerForActivityResult(
-        ActivityResultContracts.OpenDocument()
-    ) { uri ->
-        Log.i(TAG, "Selected file uri:\n $uri")
-        uri?.let { handleSelectedModel(it) }
-    }
-
-    /**
-     * Handles the file Uri from [getContent] result
-     */
-    private fun handleSelectedModel(uri: Uri) {
-        // Update UI states
-        userActionFab.isEnabled = false
-        userInputEt.hint = "Parsing GGUF..."
-        ggufTv.text = "Parsing metadata from selected file \n$uri"
-
-        lifecycleScope.launch(Dispatchers.IO) {
-            // Parse GGUF metadata
-            Log.i(TAG, "Parsing GGUF metadata...")
-            contentResolver.openInputStream(uri)?.use {
-                GgufMetadataReader.create().readStructuredMetadata(it)
-            }?.let { metadata ->
-                // Update UI to show GGUF metadata to user
-                Log.i(TAG, "GGUF parsed: \n$metadata")
-                withContext(Dispatchers.Main) {
-                    ggufTv.text = metadata.toString()
-                }
-
-                // Ensure the model file is available
-                val modelName = metadata.filename() + FILE_EXTENSION_GGUF
-                contentResolver.openInputStream(uri)?.use { input ->
-                    ensureModelFile(modelName, input)
-                }?.let { modelFile ->
-                    loadModel(modelName, modelFile)
-
-                    withContext(Dispatchers.Main) {
-                        isModelReady = true
-                        userInputEt.hint = "Type and send a message!"
-                        userInputEt.isEnabled = true
-                        userActionFab.setImageResource(R.drawable.outline_send_24)
-                        userActionFab.isEnabled = true
-                    }
-                }
-            }
-        }
-    }
-
-    /**
-     * Prepare the model file within app's private storage
-     */
-    private suspend fun ensureModelFile(modelName: String, input: InputStream) =
-        withContext(Dispatchers.IO) {
-            File(ensureModelsDirectory(), modelName).also { file ->
-                // Copy the file into local storage if not yet done
-                if (!file.exists()) {
-                    Log.i(TAG, "Start copying file to $modelName")
-                    withContext(Dispatchers.Main) {
-                        userInputEt.hint = "Copying file..."
-                    }
-
-                    FileOutputStream(file).use { input.copyTo(it) }
-                    Log.i(TAG, "Finished copying file to $modelName")
-                } else {
-                    Log.i(TAG, "File already exists $modelName")
-                }
-            }
-        }
-
-    /**
-     * Load the model file from the app private storage
-     */
-    private suspend fun loadModel(modelName: String, modelFile: File) =
-        withContext(Dispatchers.IO) {
-            Log.i(TAG, "Loading model $modelName")
-            withContext(Dispatchers.Main) {
-                userInputEt.hint = "Loading model..."
-            }
-            engine.loadModel(modelFile.path)
-        }
-
-    /**
-     * Validate and send the user message into [InferenceEngine]
-     */
-    private fun handleUserInput() {
-        userInputEt.text.toString().also { userMsg ->
-            if (userMsg.isEmpty()) {
-                Toast.makeText(this, "Input message is empty!", Toast.LENGTH_SHORT).show()
-            } else {
-                userInputEt.text = null
-                userInputEt.isEnabled = false
-                userActionFab.isEnabled = false
-
-                // Update message states
-                messages.add(Message(UUID.randomUUID().toString(), userMsg, true))
-                lastAssistantMsg.clear()
-                messages.add(Message(UUID.randomUUID().toString(), lastAssistantMsg.toString(), false))
-
-                generationJob = lifecycleScope.launch(Dispatchers.Default) {
-                    engine.sendUserPrompt(userMsg)
-                        .onCompletion {
-                            withContext(Dispatchers.Main) {
-                                userInputEt.isEnabled = true
-                                userActionFab.isEnabled = true
-                            }
-                        }.collect { token ->
-                            withContext(Dispatchers.Main) {
-                                val messageCount = messages.size
-                                check(messageCount > 0 && !messages[messageCount - 1].isUser)
-
-                                messages.removeAt(messageCount - 1).copy(
-                                    content = lastAssistantMsg.append(token).toString()
-                                ).let { messages.add(it) }
-
-                                messageAdapter.notifyItemChanged(messages.size - 1)
-                            }
-                        }
-                }
-            }
-        }
-    }
-
-    /**
-     * Run a benchmark with the model file
-     */
-    @Deprecated("This benchmark doesn't accurately indicate GUI performance expected by app developers")
-    private suspend fun runBenchmark(modelName: String, modelFile: File) =
-        withContext(Dispatchers.Default) {
-            Log.i(TAG, "Starts benchmarking $modelName")
-            withContext(Dispatchers.Main) {
-                userInputEt.hint = "Running benchmark..."
-            }
-            engine.bench(
-                pp=BENCH_PROMPT_PROCESSING_TOKENS,
-                tg=BENCH_TOKEN_GENERATION_TOKENS,
-                pl=BENCH_SEQUENCE,
-                nr=BENCH_REPETITION
-            ).let { result ->
-                messages.add(Message(UUID.randomUUID().toString(), result, false))
-                withContext(Dispatchers.Main) {
-                    messageAdapter.notifyItemChanged(messages.size - 1)
-                }
-            }
-        }
-
-    /**
-     * Create the `models` directory if not exist.
-     */
-    private fun ensureModelsDirectory() =
-        File(filesDir, DIRECTORY_MODELS).also {
-            if (it.exists() && !it.isDirectory) { it.delete() }
-            if (!it.exists()) { it.mkdir() }
-        }
-
-    override fun onStop() {
-        generationJob?.cancel()
-        super.onStop()
-    }
-
-    override fun onDestroy() {
-        engine.destroy()
-        super.onDestroy()
-    }
-
-    companion object {
-        private val TAG = MainActivity::class.java.simpleName
-
-        private const val DIRECTORY_MODELS = "models"
-        private const val FILE_EXTENSION_GGUF = ".gguf"
-
-        private const val BENCH_PROMPT_PROCESSING_TOKENS = 512
-        private const val BENCH_TOKEN_GENERATION_TOKENS = 128
-        private const val BENCH_SEQUENCE = 1
-        private const val BENCH_REPETITION = 3
+private fun getPromptModeForModel(modelName: String): PromptMode {
+    return when {
+        modelName.contains("DeepSeek API") -> PromptMode.DEEPSEEk
+        modelName.contains("Qwen2.5") -> PromptMode.QWEN2
+        modelName.contains("DeepSeek-R1-DRAFT") -> PromptMode.QWEN2
+        modelName.contains("Qwen3") -> PromptMode.QWEN3
+        else -> PromptMode.QWEN2 // Default
     }
 }
 
-fun GgufMetadata.filename() = when {
-    basic.name != null -> {
-        basic.name?.let { name ->
-            basic.sizeLabel?.let { size ->
-                "$name-$size"
-            } ?: name
+class MainActivity(
+    activityManager: ActivityManager? = null,
+    downloadManager: DownloadManager? = null,
+    clipboardManager: ClipboardManager? = null,
+): ComponentActivity() {
+    private val tag: String? = this::class.simpleName
+
+    private val activityManager by lazy { activityManager ?: getSystemService<ActivityManager>()!! }
+    private val downloadManager by lazy { downloadManager ?: getSystemService<DownloadManager>()!! }
+    private val clipboardManager by lazy { clipboardManager ?: getSystemService<ClipboardManager>()!! }
+
+    private val viewModel: MainViewModel by viewModels()
+    private lateinit var ocr: OCR
+
+    private val requestPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { isGranted ->
+        if (isGranted) {
+            takePicture()
         }
     }
-    architecture?.architecture != null -> {
-        architecture?.architecture?.let { arch ->
-            basic.uuid?.let { uuid ->
-                "$arch-$uuid"
-            } ?: "$arch-${System.currentTimeMillis()}"
+
+    private val takePictureLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == RESULT_OK) {
+            val imageBitmap = result.data?.extras?.get("data") as? Bitmap
+            imageBitmap?.let { bitmap ->
+                // 保存为临时文件，启动裁剪
+                val uri = saveBitmapToCache(bitmap)
+                startCrop(uri)
+            }
         }
     }
-    else -> {
-        "model-${System.currentTimeMillis().toHexString()}"
+
+    private val pickImageLauncher = registerForActivityResult(
+        ActivityResultContracts.GetContent()
+    ) { uri ->
+        uri?.let {
+            try {
+                // 直接启动裁剪
+                startCrop(uri)
+            } catch (e: Exception) {
+                viewModel.log("图片处理失败：${e.message}")
+            }
+        }
     }
+
+    // 裁剪图片回调
+    private val cropImageLauncher = registerForActivityResult(CropImageContract()) { result ->
+        if (result.isSuccessful) {
+            val croppedImageUri = result.uriContent
+            croppedImageUri?.let {
+                val inputStream = contentResolver.openInputStream(it)
+                val croppedBitmap = BitmapFactory.decodeStream(inputStream)
+                croppedBitmap?.let { processImage(it) }
+            }
+        } else {
+            val exception = result.error
+            viewModel.log("裁剪失败：${exception?.message}")
+        }
+    }
+
+    private fun processImage(bitmap: Bitmap) {
+        try {
+            viewModel.log("开始识别文字...")
+            ocr.run(bitmap, object : OcrRunCallback {
+                override fun onSuccess(result: OcrResult) {
+                    val allText = result.simpleText
+
+                    // 清洗OCR结果
+                    val cleanedText = allText
+                        // 通用医师/医生/技师字段
+                        .replace(Regex("""\s*(?:[\u4e00-\u9fa5]{1,6})?(医师|医生|技师)[:：]?\s*[\u4e00-\u9fa5]{2,4}""")) { matchResult ->
+                            matchResult.value.replace(Regex("""[:：]?\s*[\u4e00-\u9fa5]{2,4}$"""), "")
+                            ""
+                        }
+                        // 其他常见字段
+                        .replace(Regex("""名[:：]?\s*[\u4e00-\u9fa5]{2,4}"""), "")
+                        .replace(Regex("""号[:：]?\s*\d+"""), "")
+                        .replace(Regex("""姓名[:：]?\s*[\u4e00-\u9fa5]{2,4}"""), "")
+                        .replace(Regex("""患者[:：]?\s*[\u4e00-\u9fa5]{2,4}"""), "")
+                        // 替换身份证号
+                        .replace(Regex("\\d{17}[\\dXx]"), "")
+                        // 替换手机号
+                        .replace(Regex("1[3-9]\\d{9}"), "")
+                        // 替换住址
+                        .replace(Regex("地址[:：]?[\\u4e00-\\u9fa5A-Za-z0-9\\-]{4,}"), "")
+                        // 替换医院名
+                        .replace(Regex("[\\u4e00-\\u9fa5]{2,20}医院"), "")
+                        .replace(Regex("\\s+"), " ") // 将多个空白字符替换为单个空格
+                        .replace(Regex("[^\\p{L}\\p{N}\\p{P}\\s]"), "") // 只保留字母、数字、标点和空白字符
+                        .replace("姓", "")
+                        .trim()
+
+                    // 输出OCR结果用于调试
+                    viewModel.log("OCR原始结果：$allText")
+                    viewModel.log("OCR清洗后结果：$cleanedText")
+
+                    // 先添加图片消息
+                    viewModel.addImageMessage(bitmap)
+
+                    // 显示OCR编辑界面，让用户确认或修改
+                    // viewModel.updateMessage("请解读病例报告并给出简短建议：" + cleanedText)
+                    // viewModel.send()
+                    viewModel.showOcrEditor(cleanedText, bitmap)
+                }
+
+                override fun onFail(e: Throwable) {
+                    viewModel.log("文字识别失败：${e.message}")
+                }
+            })
+        } catch (e: Exception) {
+            viewModel.log("调用OCR失败：${e.message}")
+        }
+    }
+
+    private fun takePicture() {
+        val intent = Intent(MediaStore.ACTION_IMAGE_CAPTURE)
+        takePictureLauncher.launch(intent)
+    }
+
+    fun pickImage() {
+        pickImageLauncher.launch("image/*")
+    }
+
+    // 提供 OCR 引擎给测试模式使用
+    fun ocrEngine(): OCR = ocr
+
+    private fun checkCameraPermission() {
+        when {
+            ContextCompat.checkSelfPermission(
+                this,
+                Manifest.permission.CAMERA
+            ) == PackageManager.PERMISSION_GRANTED -> {
+                takePicture()
+            }
+            else -> {
+                requestPermissionLauncher.launch(Manifest.permission.CAMERA)
+            }
+        }
+    }
+
+    fun startCamera() {
+        checkCameraPermission()
+    }
+
+    // Get a MemoryInfo object for the device's current memory status.
+    private fun availableMemory(): ActivityManager.MemoryInfo {
+        return ActivityManager.MemoryInfo().also { memoryInfo ->
+            activityManager.getMemoryInfo(memoryInfo)
+        }
+    }
+
+    // 启动裁剪
+    private fun startCrop(uri: Uri) {
+        val cropOptions = CropImageOptions().apply {
+            // 允许手势操作
+            allowCounterRotation = true
+            allowFlipping = true
+            allowRotation = true
+            // 裁剪框设置
+            cropShape = com.canhub.cropper.CropImageView.CropShape.RECTANGLE
+            guidelines = com.canhub.cropper.CropImageView.Guidelines.ON
+            // 自由裁剪，不固定宽高比
+            fixAspectRatio = false
+            // 显示裁剪框边角
+            showCropOverlay = true
+            // 输出设置
+            outputCompressFormat = Bitmap.CompressFormat.JPEG
+            outputCompressQuality = 90
+        }
+
+        val cropImageContractOptions = CropImageContractOptions(uri, cropOptions)
+        cropImageLauncher.launch(cropImageContractOptions)
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+
+        // 初始化OCR引擎
+        ocr = OCR(this)
+        val config = OcrConfig()
+        config.modelPath = "models/ch_PP-OCRv5"
+        config.labelPath = "labels/ppocr_keys_v5.txt"
+        config.isRunDet = true
+        config.isRunCls = true
+        config.isRunRec = true
+        config.clsModelFilename = "cls.nb" // cls 模型文件名
+        config.detModelFilename = "det.nb" // det 模型文件名
+        config.recModelFilename = "rec.nb" // rec 模型文件名
+        config.cpuPowerMode = CpuPowerMode.LITE_POWER_FULL
+        config.isDrwwTextPositionBox = false
+
+        viewModel.log("正在加载OCR模型...")
+        ocr.initModel(config, object : OcrInitCallback {
+            override fun onSuccess() {
+                viewModel.log("OCR模型加载成功")
+            }
+
+            override fun onFail(e: Throwable) {
+                viewModel.log("OCR模型加载失败: $e")
+            }
+        })
+
+        StrictMode.setVmPolicy(
+            VmPolicy.Builder(StrictMode.getVmPolicy())
+                .detectLeakedClosableObjects()
+                .build()
+        )
+
+        val free = Formatter.formatFileSize(this, availableMemory().availMem)
+        val total = Formatter.formatFileSize(this, availableMemory().totalMem)
+
+        viewModel.log("Current memory: $free / $total")
+        viewModel.log("Downloads directory: ${getExternalFilesDir(null)}")
+
+        val extFilesDir = getExternalFilesDir(null)
+
+        val models = listOf(
+            // API 模型
+            Downloadable(
+                name = "DeepSeek API",
+                source = null,  // API 模型不需要下载
+                destination = null,  // API 模型不需要本地文件
+                isApiModel = true
+            ),
+            Downloadable(
+                name = "Qwen2.5-32B API",
+                source = null,  // API 模型不需要下载
+                destination = null,  // API 模型不需要本地文件
+                isApiModel = true
+            ),
+            Downloadable(
+                name = "Qwen3-32B API",
+                source = null,  // API 模型不需要下载
+                destination = null,  // API 模型不需要本地文件
+                isApiModel = true
+            ),
+            // 本地模型
+            Downloadable(
+                name = "DeepSeek-R1-DRAFT-Qwen2.5-0.5B (Q4_K_M, 0.4 GiB)",
+                source = Uri.parse("https://modelscope.cn/alamios/DeepSeek-R1-DRAFT-Qwen2.5-0.5B-GGUF/resolve/main/DeepSeek-R1-DRAFT-Qwen2.5-0.5B-Q4_K_M.gguf?download=true"),
+                destination = File(extFilesDir, "DeepSeek-R1-DRAFT-Qwen2.5-0.5B-Q4_K_M.gguf"),
+                isApiModel = false
+            ),
+            Downloadable(
+                name = "DeepSeek-R1-DRAFT-Qwen2.5-0.5B (FP16, 1 GiB)",
+                source = Uri.parse("https://modelscope.cn/alamios/DeepSeek-R1-DRAFT-Qwen2.5-0.5B-GGUF/resolve/main/DeepSeek-R1-DRAFT-Qwen2.5-0.5B-f16.gguf?download=true"),
+                destination = File(extFilesDir, "DeepSeek-R1-DRAFT-Qwen2.5-0.5B-f16.gguf"),
+                isApiModel = false
+            ),
+            Downloadable(
+                name = "Qwen3-0.6B (Q4_0, 0.4 GiB)",
+                source = Uri.parse("https://modelscope.cn/unsloth/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q4_0.gguf?download=true"),
+                destination = File(extFilesDir, "Qwen3-0.6B-Q4_0.gguf"),
+                isApiModel = false
+            ),
+            Downloadable(
+                name = "Qwen3-0.6B (FP16, 1.2GiB)",
+                source = Uri.parse("https://modelscope.cn/unsloth/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-BF16.gguf?download=true"),
+                destination = File(extFilesDir, "Qwen3-0.6B-BF16.gguf"),
+                isApiModel = false
+            ),
+            // 协同推理
+            Downloadable(
+                name = "Qwen2.5-32B+Qwen2.5-0.5B_Q4_K_M",
+                source = Uri.parse("https://modelscope.cn/alamios/DeepSeek-R1-DRAFT-Qwen2.5-0.5B-GGUF/resolve/main/DeepSeek-R1-DRAFT-Qwen2.5-0.5B-Q4_K_M.gguf?download=true"),
+                destination = File(extFilesDir, "DeepSeek-R1-DRAFT-Qwen2.5-0.5B-Q4_K_M.gguf"),
+                isHetero = true
+            ),
+            Downloadable(
+                name = "Qwen2.5-32B+Qwen2.5-0.5B",
+                source = Uri.parse("https://modelscope.cn/alamios/DeepSeek-R1-DRAFT-Qwen2.5-0.5B-GGUF/resolve/main/DeepSeek-R1-DRAFT-Qwen2.5-0.5B-f16.gguf?download=true"),
+                destination = File(extFilesDir, "DeepSeek-R1-DRAFT-Qwen2.5-0.5B-f16.gguf"),
+                isHetero = true
+            ),
+            Downloadable(
+                name = "Qwen3-32B+Qwen3-0.6B_Q4_0",
+                source = Uri.parse("https://modelscope.cn/unsloth/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q4_0.gguf?download=true"),
+                destination = File(extFilesDir, "Qwen3-0.6B-Q4_0.gguf"),
+                isHetero = true
+            ),
+            Downloadable(
+                name = "Qwen3-32B+Qwen3-0.6B",
+                source = Uri.parse("https://modelscope.cn/unsloth/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-BF16.gguf?download=true"),
+                destination = File(extFilesDir, "Qwen3-0.6B-BF16.gguf"),
+                isHetero = true
+            )
+        )
+
+        setContent {
+            LlamaAndroidTheme {
+                Surface(
+                    modifier = Modifier.fillMaxSize(),
+                    color = AppColors.Background
+                ) {
+                    MainCompose(
+                        viewModel,
+                        clipboardManager,
+                        downloadManager,
+                        models,
+                        this
+                    )
+                }
+            }
+        }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        ocr.releaseModel()
+    }
+
+    // 保存Bitmap为临时文件，返回Uri
+    private fun saveBitmapToCache(bitmap: Bitmap): Uri {
+        val file = File(cacheDir, "temp_${System.currentTimeMillis()}.jpg")
+        FileOutputStream(file).use { out ->
+            bitmap.compress(Bitmap.CompressFormat.JPEG, 100, out)
+        }
+        return Uri.fromFile(file)
+    }
+}
+
+@Composable
+fun MainCompose(
+    viewModel: MainViewModel,
+    clipboard: ClipboardManager,
+    dm: DownloadManager,
+    models: List<Downloadable>,
+    activity: MainActivity
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(AppColors.Background)
+    ) {
+        // 应用栏
+        AppBar(models, viewModel, dm, activity)
+
+        // 性能监控显示 - 始终显示CPU利用率，推理时显示推理速度
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(
+                    brush = Brush.horizontalGradient(
+                        colors = listOf(
+                            AppColors.Primary.copy(alpha = 0.12f),
+                            AppColors.PrimaryLight.copy(alpha = 0.08f)
+                        )
+                    )
+                )
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.Center
+            ) {
+                // 数据集整体速度/进度（测试模式）
+                if (viewModel.isTestRunning || viewModel.lastTestSpeed > 0) {
+                    Icon(
+                        imageVector = Icons.Default.Speed,
+                        contentDescription = "数据集速度",
+                        tint = AppColors.Primary,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    val speed = if (viewModel.isTestRunning) viewModel.datasetSpeed else viewModel.lastTestSpeed
+                    Text(
+                        text = "数据集速度: %.2f tokens/s".format(speed),
+                        color = AppColors.Primary,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Text(
+                        text = "进度: ${viewModel.testProcessed}/${viewModel.testTotal}",
+                        color = AppColors.Primary,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+
+                    Spacer(modifier = Modifier.width(16.dp))
+                    Box(
+                        modifier = Modifier
+                            .width(1.dp)
+                            .height(16.dp)
+                            .background(AppColors.Primary.copy(alpha = 0.3f))
+                    )
+                    Spacer(modifier = Modifier.width(16.dp))
+                } else if (viewModel.inferenceSpeed > 0) {
+                    Icon(
+                        imageVector = Icons.Default.Speed,
+                        contentDescription = "推理速度",
+                        tint = AppColors.Primary,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = "推理速度: %.2f tokens/s".format(viewModel.inferenceSpeed),
+                        color = AppColors.Primary,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+
+                    // 分隔符
+                    Spacer(modifier = Modifier.width(16.dp))
+                    Box(
+                        modifier = Modifier
+                            .width(1.dp)
+                            .height(16.dp)
+                            .background(AppColors.Primary.copy(alpha = 0.3f))
+                    )
+                    Spacer(modifier = Modifier.width(16.dp))
+                }
+
+                // 应用CPU使用率 或 关闭提示
+                if (viewModel.isCpuMonitorEnabled) {
+                    Icon(
+                        imageVector = Icons.Default.Memory,
+                        contentDescription = "CPU使用率",
+                        tint = AppColors.Primary,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = "CPU使用率: %.2f%%".format(viewModel.cpuUsage),
+                        color = AppColors.Primary,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                } else {
+                    Icon(
+                        imageVector = Icons.Default.Memory,
+                        contentDescription = "CPU监控关闭",
+                        tint = AppColors.Primary.copy(alpha = 0.6f),
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = "CPU监控: 已关闭",
+                        color = AppColors.Primary.copy(alpha = 0.8f),
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
+            }
+        }
+
+        // 聊天区域
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth()
+                .background(AppColors.Background)
+        ) {
+            val scrollState = rememberLazyListState()
+
+            LaunchedEffect(Unit) {
+                while (isActive) {
+                    delay(1000L)
+                    snapshotFlow {
+                        Pair(viewModel.messages.size, viewModel.messages.lastOrNull()?.content)
+                    }
+                        .collectLatest { (currentSize, _) ->
+                            scrollState.animateScrollToItem(currentSize)
+                        }
+                }
+            }
+
+            LazyColumn(
+                state = scrollState,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(horizontal = 16.dp),
+                contentPadding = PaddingValues(vertical = 16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                items(viewModel.messages.size) { index ->
+                    val chatMessage = viewModel.messages[index]
+                    MessageItem(
+                        content = chatMessage.content,
+                        isUserInput = chatMessage.type == MessageType.USER,
+                        image = chatMessage.image,
+                        messageIndex = index,
+                        isEditing = viewModel.editingMessageIndex == index,
+                        editingText = viewModel.editingText,
+                        onEditMessage = { messageIndex, content ->
+                            viewModel.startEditingMessage(messageIndex, content)
+                        },
+                        onUpdateEditingText = { text ->
+                            viewModel.updateEditingText(text)
+                        },
+                        onConfirmEdit = {
+                            viewModel.confirmEditMessage()
+                        },
+                        onCancelEdit = {
+                            viewModel.cancelEditingMessage()
+                        }
+                    )
+                }
+            }
+        }
+
+        // 输入区域
+        InputArea(
+            viewModel = viewModel,
+            onSend = { viewModel.send() },
+            onCamera = { activity.startCamera() },
+            activity = activity
+        )
+    }
+
+    // OCR编辑对话框
+    if (viewModel.isShowingOcrEditor) {
+        OcrEditDialog(
+            text = viewModel.ocrEditText,
+            onTextChange = { viewModel.updateOcrText(it) },
+            onConfirm = { viewModel.confirmOcrAndSend() },
+            onCancel = { viewModel.hideOcrEditor() }
+        )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun AppBar(
+    models: List<Downloadable>,
+    viewModel: MainViewModel,
+    dm: DownloadManager,
+    activity: MainActivity
+) {
+    var showMenu by remember { mutableStateOf(false) }
+    var downloadingModel by remember { mutableStateOf<Downloadable?>(null) }
+    var downloadProgress by remember { mutableDoubleStateOf(0.0) }
+    var downloadId by remember { mutableLongStateOf(-1L) }
+    var currentModelName by remember { mutableStateOf("Qwen") }
+    var showTestDialog by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+
+    // 用于锚定DropdownMenu
+    var buttonCoords by remember { mutableStateOf<androidx.compose.ui.geometry.Rect?>(null) }
+
+    // 监听下载进度
+    LaunchedEffect(downloadId) {
+        if (downloadId != -1L) {
+            while (true) {
+                val cursor = dm.query(DownloadManager.Query().setFilterById(downloadId))
+                if (cursor != null && cursor.moveToFirst()) {
+                    val bytesDownloaded = cursor.getLong(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_BYTES_DOWNLOADED_SO_FAR))
+                    val bytesTotal = cursor.getLong(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_TOTAL_SIZE_BYTES))
+                    downloadProgress = bytesDownloaded.toDouble() / bytesTotal
+
+                    if (bytesDownloaded == bytesTotal) {
+                        // 下载完成后加载模型
+                        downloadingModel?.let { model ->
+                            viewModel.clear() // 清除之前的对话
+                            viewModel.promptMode = getPromptModeForModel(model.name)
+                            viewModel.load(model.destination!!.path, model.isHetero)
+                            currentModelName = model.name
+                        }
+                        downloadingModel = null
+                        downloadId = -1L
+                        downloadProgress = 0.0
+                        break
+                    }
+                }
+                cursor?.close()
+                delay(1000)
+            }
+        }
+    }
+
+    // 应用栏 - 使用渐变背景
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(64.dp)
+            .background(
+                brush = Brush.horizontalGradient(
+                    colors = listOf(
+                        AppColors.AppBarBackground,
+                        AppColors.AppBarBackgroundSecondary
+                    )
+                )
+            )
+    ) {
+        val density = LocalDensity.current
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier
+                .align(Alignment.CenterStart)
+                .padding(horizontal = 16.dp)
+        ) {
+            // 测试模式按钮（移动到左侧）
+            IconButton(
+                onClick = { showTestDialog = true },
+                modifier = Modifier.size(32.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.PlayArrow,
+                    contentDescription = "测试模式",
+                    tint = AppColors.TextWhite
+                )
+            }
+            // 左侧仅保留测试按钮
+        }
+
+        // 中间：标题 + 模型下拉（保持居中）
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier
+                .align(Alignment.Center)
+                .padding(horizontal = 16.dp)
+        ) {
+            Text(
+                text = "HeteroSpec",
+                color = AppColors.TextWhite,
+                fontSize = 22.sp,
+                fontWeight = FontWeight.Bold
+            )
+            // 下拉按钮
+            Box {
+                IconButton(
+                    onClick = { showMenu = true },
+                    modifier = Modifier
+                        .size(32.dp)
+                        .onGloballyPositioned { coords ->
+                            buttonCoords = coords.boundsInWindow()
+                        }
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.ArrowDropDown,
+                        contentDescription = "选择模型",
+                        tint = AppColors.TextWhite
+                    )
+                }
+                DropdownMenu(
+                    expanded = showMenu,
+                    onDismissRequest = { showMenu = false },
+                    offset = buttonCoords?.let {
+                        DpOffset((-220).dp, with(density) { it.height.toDp() - 35.dp })
+                    } ?: DpOffset((-220).dp, (-35).dp),
+                    modifier = Modifier
+                        .background(AppColors.BackgroundSecondary)
+                        .width(320.dp)
+                ) {
+                    // API模型分组
+                    Text(
+                        text = "API模型",
+                        color = AppColors.TextPrimary,
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                    )
+                    HorizontalDivider(color = AppColors.Divider)
+                    models.filter { it.isApiModel }.forEach { model ->
+                        DropdownMenuItem(
+                            text = {
+                                Text(
+                                    model.name,
+                                    color = AppColors.TextPrimary,
+                                    fontSize = 14.sp
+                                )
+                            },
+                            onClick = {
+                                viewModel.clear()
+                                viewModel.promptMode = getPromptModeForModel(model.name)
+                                viewModel.switchToApiMode(
+                                    when (model.name) {
+                                        "DeepSeek API" -> ApiType.DEEPSEEK
+                                        "Qwen2.5-32B API" -> ApiType.QWEN
+                                        else -> ApiType.QWEN
+                                    }
+                                )
+                                currentModelName = model.name
+                                showMenu = false
+                            },
+                            trailingIcon = {
+                                if (currentModelName == model.name) {
+                                    Icon(
+                                        Icons.Default.Check,
+                                        contentDescription = "已选择",
+                                        tint = AppColors.Primary
+                                    )
+                                }
+                            }
+                        )
+                    }
+                    // 本地模型分组
+                    HorizontalDivider(color = AppColors.Divider)
+                    Text(
+                        text = "本地模型",
+                        color = AppColors.TextPrimary,
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                    )
+                    HorizontalDivider(color = AppColors.Divider)
+                    models.filter { !it.isApiModel and !it.isHetero }.forEach { model ->
+                        DropdownMenuItem(
+                            text = {
+                                Column {
+                                    Text(
+                                        model.name,
+                                        color = AppColors.TextPrimary,
+                                        fontSize = 14.sp
+                                    )
+                                    if (downloadingModel == model) {
+                                        LinearProgressIndicator(
+                                            progress = { downloadProgress.toFloat() },
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(top = 8.dp),
+                                            color = AppColors.Primary,
+                                            trackColor = AppColors.Divider,
+                                        )
+                                        Text(
+                                            text = "${(downloadProgress * 100).toInt()}%",
+                                            color = AppColors.TextSecondary,
+                                            fontSize = 12.sp,
+                                            modifier = Modifier.padding(top = 4.dp)
+                                        )
+                                    }
+                                }
+                            },
+                            onClick = {
+                                if (downloadingModel == null) {
+                                    if (model.destination?.exists() == true) {
+                                        viewModel.clear() // 清除之前的对话
+                                        viewModel.promptMode = getPromptModeForModel(model.name)
+                                        viewModel.load(model.destination.path)
+                                        currentModelName = model.name
+                                        showMenu = false
+                                    } else {
+                                        val request = DownloadManager.Request(model.source!!)
+                                            .setTitle(model.name)
+                                            .setDescription("正在下载模型...")
+                                            .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+                                            .setDestinationUri(model.destination!!.toUri())
+                                        downloadId = dm.enqueue(request)
+                                        downloadingModel = model
+                                        viewModel.log("开始下载模型：${model.name}")
+                                    }
+                                }
+                            },
+                            enabled = downloadingModel == null,
+                            trailingIcon = {
+                                if (currentModelName == model.name) {
+                                    Icon(
+                                        Icons.Default.Check,
+                                        contentDescription = "已选择",
+                                        tint = AppColors.Primary
+                                    )
+                                }
+                            }
+                        )
+                    }
+                    // 推测解码
+                    HorizontalDivider(color = AppColors.Divider)
+                    Text(
+                        text = "推测解码",
+                        color = AppColors.TextPrimary,
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                    )
+                    HorizontalDivider(color = AppColors.Divider)
+                    models.filter { it.isHetero }.forEach { model ->
+                        DropdownMenuItem(
+                            text = {
+                                Column {
+                                    Text(
+                                        model.name,
+                                        color = AppColors.TextPrimary,
+                                        fontSize = 14.sp
+                                    )
+                                    if (downloadingModel == model) {
+                                        LinearProgressIndicator(
+                                            progress = { downloadProgress.toFloat() },
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(top = 8.dp),
+                                            color = AppColors.Primary,
+                                            trackColor = AppColors.Divider,
+                                        )
+                                        Text(
+                                            text = "${(downloadProgress * 100).toInt()}%",
+                                            color = AppColors.TextSecondary,
+                                            fontSize = 12.sp,
+                                            modifier = Modifier.padding(top = 4.dp)
+                                        )
+                                    }
+                                }
+                            },
+                            onClick = {
+                                if (downloadingModel == null) {
+                                    if (model.destination?.exists() == true) {
+                                        viewModel.clear() // 清除之前的对话
+                                        viewModel.promptMode = getPromptModeForModel(model.name)
+                                        viewModel.load(model.destination.path, true)
+                                        currentModelName = model.name
+                                        showMenu = false
+                                    } else {
+                                        val request = DownloadManager.Request(model.source!!)
+                                            .setTitle(model.name)
+                                            .setDescription("正在下载模型...")
+                                            .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+                                            .setDestinationUri(model.destination!!.toUri())
+                                        downloadId = dm.enqueue(request)
+                                        downloadingModel = model
+                                        viewModel.log("开始下载草稿模型：${model.name}")
+                                    }
+                                }
+                            },
+                            enabled = downloadingModel == null,
+                            trailingIcon = {
+                                if (currentModelName == model.name) {
+                                    Icon(
+                                        Icons.Default.Check,
+                                        contentDescription = "已选择",
+                                        tint = AppColors.Primary
+                                    )
+                                }
+                            }
+                        )
+                    }
+                }
+            }
+        }
+
+        // 右侧 CPU 监控开关（不改变标题位置）
+        Row(
+            modifier = Modifier
+                .align(Alignment.CenterEnd)
+                .padding(end = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Text(
+                text = "CPU监控",
+                color = AppColors.TextWhite,
+                fontSize = 12.sp
+            )
+            androidx.compose.material3.Switch(
+                checked = viewModel.isCpuMonitorEnabled,
+                onCheckedChange = { enabled -> viewModel.updateCpuMonitorEnabled(enabled) }
+            )
+        }
+
+        // 测试模式对话框
+        if (showTestDialog) {
+            val context = LocalContext.current
+            TestDatasetDialog(
+                onDismiss = { showTestDialog = false },
+                onSelectDataset = { datasetName ->
+                    showTestDialog = false
+                    // 启动测试
+                    scope.launch {
+                        runDatasetTest(context, viewModel, datasetName, activity.ocrEngine())
+                    }
+                }
+            )
+        }
+    }
+}
+
+@Composable
+fun ImageViewerDialog(
+    bitmap: Bitmap,
+    onDismiss: () -> Unit
+) {
+    Dialog(onDismissRequest = onDismiss) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .fillMaxHeight(0.8f)
+                .background(Color.Black)
+                .padding(16.dp)
+        ) {
+            Image(
+                bitmap = bitmap.asImageBitmap(),
+                contentDescription = "Full size image",
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Fit
+            )
+
+            // 关闭按钮
+            IconButton(
+                onClick = onDismiss,
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(8.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Close,
+                    contentDescription = "Close",
+                    tint = Color.White
+                )
+            }
+        }
+    }
+}
+
+@Composable
+fun MessageItem(
+    content: String,
+    isUserInput: Boolean,
+    image: Bitmap? = null,
+    messageIndex: Int,
+    isEditing: Boolean,
+    editingText: String,
+    onEditMessage: (Int, String) -> Unit,
+    onUpdateEditingText: (String) -> Unit,
+    onConfirmEdit: () -> Unit,
+    onCancelEdit: () -> Unit
+) {
+    var showImageViewer by remember { mutableStateOf(false) }
+
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalAlignment = if (isUserInput) Alignment.End else Alignment.Start
+    ) {
+        if (isUserInput) {
+            if (image != null) {
+                // 图片消息 - 直接使用背景色
+                Box(
+                    modifier = Modifier
+                        .widthIn(max = 280.dp)
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(AppColors.Background)
+                        .clickable { showImageViewer = true }
+                        .padding(8.dp)
+                ) {
+                    Image(
+                        bitmap = image.asImageBitmap(),
+                        contentDescription = "User image",
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 200.dp)
+                            .clip(RoundedCornerShape(12.dp)),
+                        contentScale = ContentScale.Fit
+                    )
+                }
+            } else {
+                // 文本消息 - 使用蓝色背景，添加交互功能
+                UserMessageBubble(
+                    content = content,
+                    messageIndex = messageIndex,
+                    isEditing = isEditing,
+                    editingText = editingText,
+                    onEditMessage = { messageIndex, content ->
+                        onEditMessage(messageIndex, content)
+                    },
+                    onUpdateEditingText = onUpdateEditingText,
+                    onConfirmEdit = onConfirmEdit,
+                    onCancelEdit = onCancelEdit
+                )
+            }
+        } else {
+            // AI回复气泡 - 简洁边框设计
+            AIMessageBubble(content = content)
+        }
+    }
+
+    // 显示图片查看器对话框
+    if (showImageViewer && image != null) {
+        ImageViewerDialog(
+            bitmap = image,
+            onDismiss = { showImageViewer = false }
+        )
+    }
+}
+
+
+@Composable
+fun UserMessageBubble(
+    content: String,
+    messageIndex: Int,
+    isEditing: Boolean,
+    editingText: String,
+    onEditMessage: (Int, String) -> Unit,
+    onUpdateEditingText: (String) -> Unit,
+    onConfirmEdit: () -> Unit,
+    onCancelEdit: () -> Unit
+) {
+    val context = LocalContext.current
+
+    Column(horizontalAlignment = Alignment.End) {
+        if (isEditing) {
+            // 编辑模式 - 显示可编辑的输入框
+            Card(
+                modifier = Modifier.widthIn(max = 280.dp),
+                shape = RoundedCornerShape(
+                    topStart = 20.dp,
+                    topEnd = 20.dp,
+                    bottomStart = 20.dp,
+                    bottomEnd = 4.dp
+                ),
+                colors = CardDefaults.cardColors(
+                    containerColor = AppColors.InputBackground
+                ),
+                border = BorderStroke(2.dp, AppColors.Primary)
+            ) {
+                Column(
+                    modifier = Modifier.padding(12.dp)
+                ) {
+                    // 编辑输入框
+                    OutlinedTextField(
+                        value = editingText,
+                        onValueChange = onUpdateEditingText,
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = AppColors.Primary,
+                            unfocusedBorderColor = AppColors.InputBorder,
+                            focusedContainerColor = AppColors.InputBackground,
+                            unfocusedContainerColor = AppColors.InputBackground,
+                            focusedTextColor = AppColors.TextPrimary,
+                            unfocusedTextColor = AppColors.TextPrimary
+                        ),
+                        shape = RoundedCornerShape(8.dp),
+                        maxLines = 8
+                    )
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    // 操作按钮
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        // 取消按钮
+                        OutlinedButton(
+                            onClick = onCancelEdit,
+                            modifier = Modifier.weight(1f).height(36.dp),
+                            colors = ButtonDefaults.outlinedButtonColors(
+                                contentColor = AppColors.TextSecondary
+                            ),
+                            border = BorderStroke(1.dp, AppColors.InputBorder),
+                            shape = RoundedCornerShape(18.dp),
+                            contentPadding = PaddingValues(horizontal = 12.dp)
+                        ) {
+                            Text("取消", fontSize = 14.sp)
+                        }
+
+                        // 发送按钮
+                        Button(
+                            onClick = onConfirmEdit,
+                            modifier = Modifier.weight(1f).height(36.dp),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = AppColors.Primary
+                            ),
+                            shape = RoundedCornerShape(18.dp),
+                            contentPadding = PaddingValues(horizontal = 12.dp)
+                        ) {
+                            Text("发送", color = AppColors.TextWhite, fontSize = 14.sp)
+                        }
+                    }
+                }
+            }
+        } else {
+            // 正常显示模式 - 消息气泡和操作按钮
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                // 操作按钮列
+                Column(
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    // 复制按钮
+                    IconButton(
+                        onClick = {
+                            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                            val clip = ClipData.newPlainText("消息内容", content)
+                            clipboard.setPrimaryClip(clip)
+                        },
+                        modifier = Modifier.size(32.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.ContentCopy,
+                            contentDescription = "复制",
+                            tint = AppColors.TextSecondary,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+
+                    // 编辑按钮
+                    IconButton(
+                        onClick = {
+                            onEditMessage(messageIndex, content)
+                        },
+                        modifier = Modifier.size(32.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Edit,
+                            contentDescription = "编辑",
+                            tint = AppColors.TextSecondary,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+                }
+
+                // 消息气泡
+                Box(
+                    modifier = Modifier
+                        .widthIn(max = 250.dp)
+                        .clip(
+                            RoundedCornerShape(
+                                topStart = 20.dp,
+                                topEnd = 20.dp,
+                                bottomStart = 20.dp,
+                                bottomEnd = 4.dp
+                            )
+                        )
+                        .background(AppColors.UserBubble)
+                        .padding(16.dp)
+                ) {
+                    Text(
+                        text = content,
+                        color = AppColors.TextWhite,
+                        fontSize = 16.sp,
+                        lineHeight = 22.sp
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun AIMessageBubble(content: String) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .background(AppColors.AIBubble)
+            .padding(12.dp)
+    ) {
+        val thinkEndIndex = content.lowercase().indexOf("</think>")
+        val hasThinkContent = thinkEndIndex != -1
+
+        if (hasThinkContent) {
+            val thinkStartIndex = content.lowercase().indexOf("<think>")
+            val thinkContent = if (thinkStartIndex != -1) {
+                content.substring(thinkStartIndex + 7, thinkEndIndex).trim()
+            } else {
+                content.substring(0, thinkEndIndex).trim()
+            }
+            val replyContent = content.substring(thinkEndIndex + 8).trim()
+
+            var showThinking by remember { mutableStateOf(false) }
+
+            Column {
+                if (thinkContent.isNotEmpty()) {
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { showThinking = !showThinking },
+                        colors = CardDefaults.cardColors(
+                            containerColor = AppColors.Background
+                        ),
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = if (showThinking) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                                contentDescription = if (showThinking) "收起思考" else "展开思考",
+                                tint = AppColors.TextSecondary,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "思考过程",
+                                color = AppColors.TextSecondary,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Medium
+                            )
+                        }
+                    }
+
+                    if (showThinking) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = CardDefaults.cardColors(
+                                containerColor = AppColors.Background.copy(alpha = 0.5f)
+                            ),
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            MarkdownText(
+                                markdown = thinkContent,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(12.dp),
+                                style = MaterialTheme.typography.bodyMedium.copy(
+                                    color = AppColors.TextSecondary,
+                                    fontSize = 14.sp,
+                                    lineHeight = 20.sp
+                                )
+                            )
+                        }
+                    }
+
+                    if (replyContent.isNotEmpty()) {
+                        Spacer(modifier = Modifier.height(12.dp))
+                    }
+                }
+
+                // 最终回复内容
+                if (replyContent.isNotEmpty()) {
+                    MarkdownText(
+                        markdown = replyContent,
+                        modifier = Modifier.fillMaxWidth(),
+                        style = MaterialTheme.typography.bodyLarge.copy(
+                            color = AppColors.TextPrimary,
+                            fontSize = 16.sp,
+                            lineHeight = 24.sp
+                        )
+                    )
+                }
+            }
+        } else {
+            // 没有思考内容，正常显示
+            val markdownContent = remember(content) { content }
+            MarkdownText(
+                markdown = markdownContent,
+                modifier = Modifier.fillMaxWidth(),
+                style = MaterialTheme.typography.bodyLarge.copy(
+                    color = AppColors.TextPrimary,
+                    fontSize = 16.sp,
+                    lineHeight = 24.sp
+                )
+            )
+        }
+    }
+}
+
+@Composable
+fun InputArea(
+    viewModel: MainViewModel,
+    onSend: () -> Unit,
+    onCamera: () -> Unit,
+    activity: MainActivity
+) {
+    Column {
+        // 分割线
+        HorizontalDivider(
+            thickness = 1.dp,
+            color = AppColors.Divider
+        )
+
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(AppColors.BackgroundSecondary)
+                .padding(16.dp),
+            verticalAlignment = Alignment.Bottom
+        ) {
+            // 相机按钮
+            IconButton(
+                onClick = onCamera,
+                modifier = Modifier
+                    .size(48.dp)
+                    .clip(RoundedCornerShape(24.dp))
+                    .background(AppColors.Background)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Camera,
+                    contentDescription = "Take Photo",
+                    tint = AppColors.Primary,
+                    modifier = Modifier.size(24.dp)
+                )
+            }
+
+            Spacer(modifier = Modifier.width(8.dp))
+
+            // 相册按钮
+            IconButton(
+                onClick = { activity.pickImage() },
+                modifier = Modifier
+                    .size(48.dp)
+                    .clip(RoundedCornerShape(24.dp))
+                    .background(AppColors.Background)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Image,
+                    contentDescription = "Pick Image",
+                    tint = AppColors.Primary,
+                    modifier = Modifier.size(24.dp)
+                )
+            }
+
+            Spacer(modifier = Modifier.width(12.dp))
+
+            // 输入框
+            OutlinedTextField(
+                value = viewModel.message,
+                onValueChange = { viewModel.updateMessage(it) },
+                modifier = Modifier
+                    .weight(1f)
+                    .heightIn(min = 48.dp)
+                    .clip(RoundedCornerShape(24.dp)),
+                placeholder = {
+                    Text(
+                        "输入消息...",
+                        color = AppColors.TextMuted,
+                        fontSize = 16.sp
+                    )
+                },
+                shape = RoundedCornerShape(24.dp),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedBorderColor = AppColors.InputBorderFocused,
+                    unfocusedBorderColor = AppColors.InputBorder,
+                    focusedContainerColor = AppColors.InputBackground,
+                    unfocusedContainerColor = AppColors.InputBackground,
+                    focusedTextColor = AppColors.TextPrimary,
+                    unfocusedTextColor = AppColors.TextPrimary
+                ),
+                maxLines = 4
+            )
+
+            Spacer(modifier = Modifier.width(12.dp))
+
+            Button(
+                onClick = onSend,
+                modifier = Modifier
+                    .height(48.dp)
+                    .clip(RoundedCornerShape(24.dp)),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = AppColors.Primary,
+                    disabledContainerColor = AppColors.TextMuted
+                ),
+                contentPadding = PaddingValues(horizontal = 20.dp)
+            ) {
+                Text(
+                    "发送",
+                    color = AppColors.TextWhite,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Medium
+                )
+            }
+        }
+    }
+}
+
+@Composable
+fun OcrEditDialog(
+    text: String,
+    onTextChange: (String) -> Unit,
+    onConfirm: () -> Unit,
+    onCancel: () -> Unit
+) {
+    Dialog(onDismissRequest = onCancel) {
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .fillMaxHeight(0.8f)
+                .padding(16.dp),
+            shape = RoundedCornerShape(16.dp),
+            colors = CardDefaults.cardColors(
+                containerColor = AppColors.BackgroundSecondary
+            )
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(20.dp)
+            ) {
+                // 标题
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "OCR识别结果",
+                        fontSize = 20.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = AppColors.TextPrimary
+                    )
+                    IconButton(onClick = onCancel) {
+                        Icon(
+                            imageVector = Icons.Default.Close,
+                            contentDescription = "关闭",
+                            tint = AppColors.TextSecondary
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                // 说明文字
+                Text(
+                    text = "请检查并编辑识别出的文字内容，确认无误后发送给AI进行病例解读：",
+                    fontSize = 14.sp,
+                    color = AppColors.TextSecondary,
+                    lineHeight = 20.sp
+                )
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                // 文本编辑框
+                OutlinedTextField(
+                    value = text,
+                    onValueChange = onTextChange,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f),
+                    placeholder = {
+                        Text(
+                            "OCR识别的文字内容...",
+                            color = AppColors.TextMuted
+                        )
+                    },
+                    shape = RoundedCornerShape(12.dp),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = AppColors.InputBorderFocused,
+                        unfocusedBorderColor = AppColors.InputBorder,
+                        focusedContainerColor = AppColors.InputBackground,
+                        unfocusedContainerColor = AppColors.InputBackground,
+                        focusedTextColor = AppColors.TextPrimary,
+                        unfocusedTextColor = AppColors.TextPrimary
+                    ),
+                    maxLines = 15
+                )
+
+                Spacer(modifier = Modifier.height(20.dp))
+
+                // 按钮行
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    // 取消按钮
+                    OutlinedButton(
+                        onClick = onCancel,
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(48.dp),
+                        shape = RoundedCornerShape(24.dp),
+                        border = BorderStroke(1.dp, AppColors.InputBorder),
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            contentColor = AppColors.TextSecondary
+                        )
+                    ) {
+                        Text(
+                            "取消",
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+
+                    // 确认发送按钮
+                    Button(
+                        onClick = onConfirm,
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(48.dp),
+                        shape = RoundedCornerShape(24.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = AppColors.Primary
+                        )
+                    ) {
+                        Text(
+                            "确认发送",
+                            color = AppColors.TextWhite,
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ===== 测试模式实现 =====
+
+@Composable
+private fun TestDatasetDialog(
+    onDismiss: () -> Unit,
+    onSelectDataset: (String) -> Unit,
+) {
+    val context = LocalContext.current
+    val datasets = remember {
+        try {
+            context.assets.list("datasets")?.toList()?.sorted() ?: emptyList()
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+
+    Dialog(onDismissRequest = onDismiss) {
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            shape = RoundedCornerShape(12.dp),
+            colors = CardDefaults.cardColors(containerColor = AppColors.BackgroundSecondary)
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text("选择数据集", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary)
+                Spacer(modifier = Modifier.height(12.dp))
+                if (datasets.isEmpty()) {
+                    Text("未找到数据集（请将数据放入 assets/datasets）", color = AppColors.TextSecondary)
+                } else {
+                    LazyColumn(
+                        modifier = Modifier.heightIn(max = 300.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        items(datasets) { name ->
+                            Card(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { onSelectDataset(name) },
+                                shape = RoundedCornerShape(8.dp),
+                                colors = CardDefaults.cardColors(containerColor = AppColors.Background)
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(12.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Image,
+                                        contentDescription = null,
+                                        tint = AppColors.Primary,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text(name, color = AppColors.TextPrimary)
+                                }
+                            }
+                        }
+                    }
+                }
+                Spacer(modifier = Modifier.height(12.dp))
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    TextButton(onClick = onDismiss) { Text("取消") }
+                }
+            }
+        }
+    }
+}
+
+private suspend fun runDatasetTest(
+    context: Context,
+    viewModel: MainViewModel,
+    datasetName: String,
+    ocr: OCR,
+) {
+    // 判定数据集类型：目录中的图片，或单文件 json/csv/txt
+    val base = "datasets/$datasetName"
+    val entries = try { context.assets.list(base) } catch (_: Exception) { null }
+
+    val imageExts = setOf(".jpg", ".jpeg", ".png", ".webp", ".bmp")
+
+    if (entries != null && entries.isNotEmpty()) {
+        // 目录：假定为图片集合
+        val imageFiles = entries.filter { name ->
+            val lower = name.lowercase(Locale.ROOT)
+            imageExts.any { lower.endsWith(it) }
+        }.sorted()
+
+        viewModel.startTest(imageFiles.size)
+        for (file in imageFiles) {
+            try {
+                context.assets.open("$base/$file").use { input ->
+                    val bitmap = BitmapFactory.decodeStream(input)
+                    if (bitmap != null) {
+                        val text = runOcrSuspend(ocr, bitmap)
+                        viewModel.sendForTest_impl(text)
+                    } else {
+                        viewModel.sendForTest_impl("")
+                    }
+                }
+            } catch (e: Exception) {
+                viewModel.log("读取图片失败：${e.message}")
+                viewModel.sendForTest_impl("")
+            }
+        }
+        viewModel.finishTest()
+        return
+    }
+
+    // 单文件数据集
+    val candidates = listOf("$base.json", "$base.csv", "$base.txt")
+    var openedName: String? = null
+    for (c in candidates) {
+        try {
+            context.assets.open(c).close()
+            openedName = c
+            break
+        } catch (_: Exception) { }
+    }
+
+    if (openedName == null) {
+        viewModel.log("未识别的数据集：$datasetName")
+        return
+    }
+
+    val prompts: List<String> = when {
+        openedName.endsWith(".json") -> readPromptsFromJson(context, openedName)
+        openedName.endsWith(".csv") -> readPromptsFromCsv(context, openedName)
+        else -> readPromptsFromTxt(context, openedName)
+    }
+
+    viewModel.startTest(prompts.size)
+    for (p in prompts) {
+        viewModel.sendForTest_impl(p)
+    }
+    viewModel.finishTest()
+}
+
+private fun readPromptsFromTxt(context: Context, assetPath: String): List<String> =
+    try {
+        context.assets.open(assetPath).use { input ->
+            BufferedReader(InputStreamReader(input)).readLines().map { it.trim() }.filter { it.isNotEmpty() }
+        }
+    } catch (_: Exception) { emptyList() }
+
+private fun readPromptsFromCsv(context: Context, assetPath: String): List<String> =
+    try {
+        context.assets.open(assetPath).use { input ->
+            val lines = BufferedReader(InputStreamReader(input)).readLines()
+            if (lines.isEmpty()) return emptyList()
+            val header = lines.first().split(',')
+            val colIndex = header.indexOfFirst { it.equals("question", true) || it.equals("prompt", true) || it.equals("input", true) }
+            val rows = lines.drop(1)
+            rows.mapNotNull { row ->
+                val cols = row.split(',')
+                val value = if (colIndex in cols.indices) cols[colIndex] else cols.firstOrNull()
+                value?.trim()?.takeIf { it.isNotEmpty() }
+            }
+        }
+    } catch (_: Exception) { emptyList() }
+
+private fun readPromptsFromJson(context: Context, assetPath: String): List<String> =
+    try {
+        val text = context.assets.open(assetPath).use { input ->
+            BufferedReader(InputStreamReader(input)).readText()
+        }
+        val arr = JSONArray(text)
+        val result = mutableListOf<String>()
+        for (i in 0 until arr.length()) {
+            val el = arr.get(i)
+            when (el) {
+                is JSONObject -> {
+                    val v = el.optString("question",
+                        el.optString("prompt",
+                            el.optString("input", "")
+                        )
+                    )
+                    if (v.isNotBlank()) result += v
+                }
+                is String -> if (el.isNotBlank()) result += el
+            }
+        }
+        result
+    } catch (_: Exception) { emptyList() }
+
+private suspend fun runOcrSuspend(ocr: OCR, bitmap: Bitmap): String =
+    suspendCancellableCoroutine { cont ->
+        try {
+            ocr.run(bitmap, object : OcrRunCallback {
+                override fun onSuccess(result: OcrResult) {
+                    val cleaned = cleanOcrText(result.simpleText)
+                    cont.resume(cleaned)
+                }
+
+                override fun onFail(e: Throwable) {
+                    cont.resume("")
+                }
+            })
+        } catch (_: Exception) {
+            cont.resume("")
+        }
+    }
+
+private fun cleanOcrText(allText: String): String {
+    return allText
+        .replace(Regex("""\s*(?:[\u4e00-\u9fa5]{1,6})?(医师|医生|技师)[:：]?\s*[\u4e00-\u9fa5]{2,4}""")) { _ -> "" }
+        .replace(Regex("""名[:：]?\s*[\u4e00-\u9fa5]{2,4}"""), "")
+        .replace(Regex("""号[:：]?\s*\d+"""), "")
+        .replace(Regex("""姓名[:：]?\s*[\u4e00-\u9fa5]{2,4}"""), "")
+        .replace(Regex("""患者[:：]?\s*[\u4e00-\u9fa5]{2,4}"""), "")
+        .replace(Regex("\n+"), " ")
+        .replace(Regex("\\d{17}[\\dXx]"), "")
+        .replace(Regex("1[3-9]\\d{9}"), "")
+        .replace(Regex("地址[:：]?[\\u4e00-\\u9fa5A-Za-z0-9\\-]{4,}"), "")
+        .replace(Regex("[\\u4e00-\\u9fa5]{2,20}医院"), "")
+        .replace(Regex("\\s+"), " ")
+        .replace(Regex("[^\\p{L}\\p{N}\\p{P}\\s]"), "")
+        .replace("姓", "")
+        .trim()
 }

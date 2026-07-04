@@ -1,0 +1,1561 @@
+#include <android/log.h>
+#include <algorithm>
+#include <array>
+#include <condition_variable>
+#include <cstdint>
+#include <cstring>
+#include <cmath>
+#include <jni.h>
+#include <iomanip>
+#include <limits>
+#include <math.h>
+#include <memory>
+#include <sstream>
+#include <string>
+#include <unistd.h>
+#include <openssl/sha.h>
+#include "llama.h"
+#include "common.h"
+#include "websocketpp/client.hpp"
+#include "websocketpp/config/asio_client.hpp"
+#include <thread>
+#include <chrono>
+// Write C++ code here.
+//
+// Do not forget to dynamically load the C++ library into your application.
+//
+// For instance,
+//
+// In MainActivity.java:
+//    static {
+//       System.loadLibrary("llama-android");
+//    }
+//
+// Or, in MainActivity.kt:
+//    companion object {
+//      init {
+//         System.loadLibrary("llama-android")
+//      }
+//    }
+
+#define TAG "llama-android.cpp"
+#define LOGi(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
+#define LOGe(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
+
+jclass la_int_var;
+jmethodID la_int_var_value;
+jmethodID la_int_var_inc;
+
+std::string cached_token_chars;
+
+bool is_valid_utf8(const char * string) {
+    if (!string) {
+        return true;
+    }
+
+    const unsigned char * bytes = (const unsigned char *)string;
+    int num;
+
+    while (*bytes != 0x00) {
+        if ((*bytes & 0x80) == 0x00) {
+            // U+0000 to U+007F
+            num = 1;
+        } else if ((*bytes & 0xE0) == 0xC0) {
+            // U+0080 to U+07FF
+            num = 2;
+        } else if ((*bytes & 0xF0) == 0xE0) {
+            // U+0800 to U+FFFF
+            num = 3;
+        } else if ((*bytes & 0xF8) == 0xF0) {
+            // U+10000 to U+10FFFF
+            num = 4;
+        } else {
+            return false;
+        }
+
+        bytes += 1;
+        for (int i = 1; i < num; ++i) {
+            if ((*bytes & 0xC0) != 0x80) {
+                return false;
+            }
+            bytes += 1;
+        }
+    }
+
+    return true;
+}
+
+static void log_callback(ggml_log_level level, const char * fmt, void * data) {
+    if (level == GGML_LOG_LEVEL_ERROR)     __android_log_print(ANDROID_LOG_ERROR, TAG, fmt, data);
+    else if (level == GGML_LOG_LEVEL_INFO) __android_log_print(ANDROID_LOG_INFO, TAG, fmt, data);
+    else if (level == GGML_LOG_LEVEL_WARN) __android_log_print(ANDROID_LOG_WARN, TAG, fmt, data);
+    else __android_log_print(ANDROID_LOG_DEFAULT, TAG, fmt, data);
+}
+
+extern "C"
+JNIEXPORT jlong JNICALL
+Java_android_llama_cpp_LLamaAndroid_load_1model(JNIEnv *env, jobject, jstring filename) {
+    llama_model_params model_params = llama_model_default_params();
+
+    auto path_to_model = env->GetStringUTFChars(filename, 0);
+    LOGi("Loading model from %s", path_to_model);
+
+    auto model = llama_model_load_from_file(path_to_model, model_params);
+    env->ReleaseStringUTFChars(filename, path_to_model);
+
+    if (!model) {
+        LOGe("load_model() failed");
+        env->ThrowNew(env->FindClass("java/lang/IllegalStateException"), "load_model() failed");
+        return 0;
+    }
+
+    return reinterpret_cast<jlong>(model);
+}
+
+extern "C"
+JNIEXPORT void JNICALL
+Java_android_llama_cpp_LLamaAndroid_free_1model(JNIEnv *, jobject, jlong model) {
+    llama_model_free(reinterpret_cast<llama_model *>(model));
+}
+
+extern "C"
+JNIEXPORT jlong JNICALL
+Java_android_llama_cpp_LLamaAndroid_new_1context(JNIEnv *env, jobject, jlong jmodel) {
+    auto model = reinterpret_cast<llama_model *>(jmodel);
+
+    if (!model) {
+        LOGe("new_context(): model cannot be null");
+        env->ThrowNew(env->FindClass("java/lang/IllegalArgumentException"), "Model cannot be null");
+        return 0;
+    }
+
+    int n_threads = std::max(1, std::min(8, (int) sysconf(_SC_NPROCESSORS_ONLN) - 2));
+    LOGi("Using %d threads", n_threads);
+
+    llama_context_params ctx_params = llama_context_default_params();
+
+    ctx_params.n_ctx           = 3072;
+    ctx_params.n_threads       = n_threads;
+    ctx_params.n_threads_batch = n_threads;
+    ctx_params.n_batch         = 1536;  // 增加批处理大小
+
+    llama_context * context = llama_init_from_model(model, ctx_params);
+
+    if (!context) {
+        LOGe("llama_new_context_with_model() returned null)");
+        env->ThrowNew(env->FindClass("java/lang/IllegalStateException"),
+                      "llama_new_context_with_model() returned null)");
+        return 0;
+    }
+
+    return reinterpret_cast<jlong>(context);
+}
+
+extern "C"
+JNIEXPORT void JNICALL
+Java_android_llama_cpp_LLamaAndroid_free_1context(JNIEnv *, jobject, jlong context) {
+    llama_free(reinterpret_cast<llama_context *>(context));
+}
+
+extern "C"
+JNIEXPORT void JNICALL
+Java_android_llama_cpp_LLamaAndroid_backend_1free(JNIEnv *, jobject) {
+    llama_backend_free();
+}
+
+extern "C"
+JNIEXPORT void JNICALL
+Java_android_llama_cpp_LLamaAndroid_log_1to_1android(JNIEnv *, jobject) {
+    llama_log_set(log_callback, NULL);
+}
+
+extern "C"
+JNIEXPORT jlong JNICALL
+Java_android_llama_cpp_LLamaAndroid_new_1batch(JNIEnv *, jobject, jint n_tokens, jint embd, jint n_seq_max) {
+
+    // Source: Copy of llama.cpp:llama_batch_init but heap-allocated.
+
+    llama_batch *batch = new llama_batch {
+        0,
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr,
+    };
+
+    if (embd) {
+        batch->embd = (float *) malloc(sizeof(float) * n_tokens * embd);
+    } else {
+        batch->token = (llama_token *) malloc(sizeof(llama_token) * n_tokens);
+    }
+
+    batch->pos      = (llama_pos *)     malloc(sizeof(llama_pos)      * n_tokens);
+    batch->n_seq_id = (int32_t *)       malloc(sizeof(int32_t)        * n_tokens);
+    batch->seq_id   = (llama_seq_id **) malloc(sizeof(llama_seq_id *) * n_tokens);
+    for (int i = 0; i < n_tokens; ++i) {
+        batch->seq_id[i] = (llama_seq_id *) malloc(sizeof(llama_seq_id) * n_seq_max);
+    }
+    batch->logits   = (int8_t *)        malloc(sizeof(int8_t)         * n_tokens);
+
+    return reinterpret_cast<jlong>(batch);
+}
+
+extern "C"
+JNIEXPORT void JNICALL
+Java_android_llama_cpp_LLamaAndroid_free_1batch(JNIEnv *, jobject, jlong batch_pointer) {
+    //llama_batch_free(*reinterpret_cast<llama_batch *>(batch_pointer));
+    const auto batch = reinterpret_cast<llama_batch *>(batch_pointer);
+    delete batch;
+}
+
+extern "C"
+JNIEXPORT jlong JNICALL
+Java_android_llama_cpp_LLamaAndroid_new_1sampler(JNIEnv *, jobject) {
+    auto sparams = llama_sampler_chain_default_params();
+    sparams.no_perf = true;
+    llama_sampler * smpl = llama_sampler_chain_init(sparams);
+    llama_sampler_chain_add(smpl, llama_sampler_init_greedy());
+
+    return reinterpret_cast<jlong>(smpl);
+}
+
+extern "C"
+JNIEXPORT void JNICALL
+Java_android_llama_cpp_LLamaAndroid_free_1sampler(JNIEnv *, jobject, jlong sampler_pointer) {
+    llama_sampler_free(reinterpret_cast<llama_sampler *>(sampler_pointer));
+}
+
+extern "C"
+JNIEXPORT void JNICALL
+Java_android_llama_cpp_LLamaAndroid_backend_1init(JNIEnv *, jobject) {
+    llama_backend_init();
+}
+
+extern "C"
+JNIEXPORT jstring JNICALL
+Java_android_llama_cpp_LLamaAndroid_system_1info(JNIEnv *env, jobject) {
+    return env->NewStringUTF(llama_print_system_info());
+}
+
+extern "C"
+JNIEXPORT jint JNICALL
+Java_android_llama_cpp_LLamaAndroid_completion_1init(
+        JNIEnv *env,
+        jobject,
+        jlong context_pointer,
+        jlong batch_pointer,
+        jstring jtext,
+        jboolean format_chat,
+        jint n_len
+    ) {
+
+    cached_token_chars.clear();
+
+    const auto text = env->GetStringUTFChars(jtext, 0);
+    const auto context = reinterpret_cast<llama_context *>(context_pointer);
+    const auto batch = reinterpret_cast<llama_batch *>(batch_pointer);
+
+    bool parse_special = (format_chat == JNI_TRUE);
+    const auto tokens_list = common_tokenize(context, text, true, parse_special);
+
+    auto n_ctx = llama_n_ctx(context);
+    auto n_kv_req = tokens_list.size() + n_len;
+
+    LOGi("n_len = %d, n_ctx = %d, n_kv_req = %zu", n_len, n_ctx, n_kv_req);
+
+    if (n_kv_req > n_ctx) {
+        LOGe("error: n_kv_req > n_ctx, the required KV cache size is not big enough");
+    }
+
+    for (auto id : tokens_list) {
+        LOGi("token: `%s`-> %d ", common_token_to_piece(context, id).c_str(), id);
+    }
+
+    common_batch_clear(*batch);
+
+    // evaluate the initial prompt
+    for (auto i = 0; i < tokens_list.size(); i++) {
+        common_batch_add(*batch, tokens_list[i], i, { 0 }, false);
+    }
+
+    // llama_decode will output logits only for the last token of the prompt
+    batch->logits[batch->n_tokens - 1] = true;
+
+    if (llama_decode(context, *batch) != 0) {
+        LOGe("llama_decode() failed");
+    }
+
+    env->ReleaseStringUTFChars(jtext, text);
+
+    return batch->n_tokens;
+}
+
+extern "C"
+JNIEXPORT jstring JNICALL
+Java_android_llama_cpp_LLamaAndroid_completion_1loop(
+        JNIEnv * env,
+        jobject,
+        jlong context_pointer,
+        jlong batch_pointer,
+        jlong sampler_pointer,
+        jint n_len,
+        jobject intvar_ncur
+) {
+    const auto context = reinterpret_cast<llama_context *>(context_pointer);
+    const auto batch   = reinterpret_cast<llama_batch   *>(batch_pointer);
+    const auto sampler = reinterpret_cast<llama_sampler *>(sampler_pointer);
+    const auto model = llama_get_model(context);
+    const auto vocab = llama_model_get_vocab(model);
+
+    if (!la_int_var) la_int_var = env->GetObjectClass(intvar_ncur);
+    if (!la_int_var_value) la_int_var_value = env->GetMethodID(la_int_var, "getValue", "()I");
+    if (!la_int_var_inc) la_int_var_inc = env->GetMethodID(la_int_var, "inc", "()V");
+
+    // sample the most likely token
+    const auto new_token_id = llama_sampler_sample(sampler, context, -1);
+
+    const auto n_cur = env->CallIntMethod(intvar_ncur, la_int_var_value);
+    if (llama_vocab_is_eog(vocab, new_token_id) || n_cur == n_len) {
+        return nullptr;
+    }
+
+    auto new_token_chars = common_token_to_piece(context, new_token_id);
+    cached_token_chars += new_token_chars;
+
+    jstring new_token = nullptr;
+    if (is_valid_utf8(cached_token_chars.c_str())) {
+        new_token = env->NewStringUTF(cached_token_chars.c_str());
+        LOGi("cached: %s, new_token_chars: `%s`, id: %d", cached_token_chars.c_str(), new_token_chars.c_str(), new_token_id);
+        cached_token_chars.clear();
+    } else {
+        new_token = env->NewStringUTF("");
+    }
+
+    common_batch_clear(*batch);
+    common_batch_add(*batch, new_token_id, n_cur, { 0 }, true);
+
+    env->CallVoidMethod(intvar_ncur, la_int_var_inc);
+
+    if (llama_decode(context, *batch) != 0) {
+        LOGe("llama_decode() returned null");
+    }
+
+    return new_token;
+}
+
+extern "C"
+JNIEXPORT void JNICALL
+Java_android_llama_cpp_LLamaAndroid_kv_1cache_1clear(JNIEnv *, jobject, jlong context) {
+    llama_memory_clear(llama_get_memory(reinterpret_cast<llama_context *>(context)), true);
+}
+
+// HeteroSpec
+
+typedef websocketpp::client<websocketpp::config::asio_client> ws_client;
+
+namespace heterospec_v3 {
+constexpr uint8_t MSG_PREFILL_REQUEST = 0x10;
+constexpr uint8_t MSG_VERIFY_REQUEST  = 0x11;
+constexpr uint8_t MSG_CLOSE           = 0x12;
+constexpr uint8_t MSG_PREFILL_ACK     = 0x90;
+constexpr uint8_t MSG_VERIFY_ACK      = 0x91;
+constexpr uint8_t MSG_ERROR           = 0x7F;
+}
+
+static void append_u32_le(std::vector<uint8_t>& out, uint32_t value) {
+    out.push_back(static_cast<uint8_t>(value & 0xFFu));
+    out.push_back(static_cast<uint8_t>((value >> 8u) & 0xFFu));
+    out.push_back(static_cast<uint8_t>((value >> 16u) & 0xFFu));
+    out.push_back(static_cast<uint8_t>((value >> 24u) & 0xFFu));
+}
+
+static void append_i32_le(std::vector<uint8_t>& out, int32_t value) {
+    append_u32_le(out, static_cast<uint32_t>(value));
+}
+
+static bool read_u32_le(const uint8_t * data, size_t size, size_t offset, uint32_t& value) {
+    if (offset + sizeof(uint32_t) > size) {
+        return false;
+    }
+    value = static_cast<uint32_t>(data[offset])
+            | (static_cast<uint32_t>(data[offset + 1]) << 8u)
+            | (static_cast<uint32_t>(data[offset + 2]) << 16u)
+            | (static_cast<uint32_t>(data[offset + 3]) << 24u);
+    return true;
+}
+
+static bool read_i32_le(const uint8_t * data, size_t size, size_t offset, int32_t& value) {
+    uint32_t raw = 0;
+    if (!read_u32_le(data, size, offset, raw)) {
+        return false;
+    }
+    value = static_cast<int32_t>(raw);
+    return true;
+}
+
+static std::vector<uint8_t> pack_token_request_v3(
+        uint8_t type,
+        uint32_t request_id,
+        const llama_tokens& tokens) {
+    std::vector<uint8_t> out;
+    out.reserve(1 + 2 * sizeof(uint32_t) + tokens.size() * sizeof(int32_t));
+    out.push_back(type);
+    append_u32_le(out, request_id);
+    append_u32_le(out, static_cast<uint32_t>(tokens.size()));
+    for (llama_token token : tokens) {
+        append_i32_le(out, static_cast<int32_t>(token));
+    }
+    return out;
+}
+
+static std::vector<uint8_t> pack_close_request_v3(uint32_t request_id) {
+    std::vector<uint8_t> out;
+    out.reserve(1 + sizeof(uint32_t));
+    out.push_back(heterospec_v3::MSG_CLOSE);
+    append_u32_le(out, request_id);
+    return out;
+}
+
+struct CloudState {
+    ws_client client;
+    websocketpp::connection_hdl connection;
+    std::string server_url;
+    bool is_connected = false;
+    std::vector<int> accepted_tokens;
+    uint32_t next_request_id = 1;
+    uint32_t pending_request_id = 0;
+    uint32_t response_request_id = 0;
+    uint32_t response_verify_us = 0;
+    uint32_t response_queue_us = 0;
+    uint32_t response_flags = 0;
+    int response_accepted_draft_count = 0;
+    bool has_prefill_ack = false;
+    bool has_verify_response = false;
+    bool has_error = false;
+    uint32_t error_request_id = 0;
+    uint32_t error_code = 0;
+    std::string error_message;
+    std::mutex mutex;
+    std::condition_variable cv;
+    std::vector<llama_token> prompt_tokens;
+    int n_past{};
+    llama_token last_token{};
+    std::thread client_thread;
+    std::condition_variable connect_cv;
+    bool connection_ready = false;
+
+    // 添加draft time存储数组
+    std::vector<double> draft_times;
+
+    int adaptive_n_draft = 3;
+    int min_n_draft = 1;
+    int max_n_draft = 6;
+    double draft_token_time_ema = 0.0;
+    double verify_wait_time_ema = 0.0;
+    double accept_rate_ema = 0.5;
+    double ema_alpha = 0.3;
+    double slo_tpot = 0.120;
+    double default_draft_per_token = 0.020;
+    double default_verify_wait_time = 0.080;
+    double default_rtt = 0.040;
+    double default_uplink_bytes_per_second = 4000.0;
+    double rtt_ema = 0.0;
+    double uplink_bytes_per_second_ema = 0.0;
+    double queue_time_ema = 0.0;
+    bool draft_token_time_ema_ready = false;
+    bool verify_wait_time_ema_ready = false;
+    bool rtt_ema_ready = false;
+    bool uplink_bytes_per_second_ema_ready = false;
+    bool queue_time_ema_ready = false;
+    std::array<double, 11> confidence_bucket_accept_ema{};
+    std::array<bool, 11> confidence_bucket_ready{};
+    std::array<double, 6> position_accept_ema{};
+    std::array<bool, 6> position_accept_ready{};
+    int64_t litepp_total_wasted_tokens = 0;
+    int64_t litepp_total_payload_bytes = 0;
+};
+
+static uint32_t cloud_next_request_id(CloudState& state) {
+    std::lock_guard<std::mutex> lock(state.mutex);
+    if (state.next_request_id == 0) {
+        state.next_request_id = 1;
+    }
+    return state.next_request_id++;
+}
+
+static void cloud_prepare_pending(CloudState& state, uint32_t request_id) {
+    std::lock_guard<std::mutex> lock(state.mutex);
+    state.pending_request_id = request_id;
+    state.response_request_id = 0;
+    state.response_verify_us = 0;
+    state.response_queue_us = 0;
+    state.response_flags = 0;
+    state.response_accepted_draft_count = 0;
+    state.accepted_tokens.clear();
+    state.has_prefill_ack = false;
+    state.has_verify_response = false;
+    state.has_error = false;
+    state.error_request_id = 0;
+    state.error_code = 0;
+    state.error_message.clear();
+}
+
+static bool parse_v3_verify_ack(
+        const uint8_t * data,
+        size_t size,
+        uint32_t& request_id,
+        int& accepted_draft_count,
+        uint32_t& verify_us,
+        uint32_t& queue_us,
+        uint32_t& flags,
+        std::vector<int>& tokens) {
+    constexpr size_t header_size = 1 + 6 * sizeof(uint32_t);
+    if (size < header_size) {
+        return false;
+    }
+
+    uint32_t token_count = 0;
+    uint32_t accepted_count_u32 = 0;
+    if (!read_u32_le(data, size, 1, request_id)
+            || !read_u32_le(data, size, 5, accepted_count_u32)
+            || !read_u32_le(data, size, 9, token_count)
+            || !read_u32_le(data, size, 13, verify_us)
+            || !read_u32_le(data, size, 17, queue_us)
+            || !read_u32_le(data, size, 21, flags)) {
+        return false;
+    }
+    accepted_draft_count = static_cast<int>(accepted_count_u32);
+    if (size != header_size + static_cast<size_t>(token_count) * sizeof(int32_t)) {
+        return false;
+    }
+
+    tokens.clear();
+    tokens.reserve(token_count);
+    for (uint32_t i = 0; i < token_count; ++i) {
+        int32_t token = 0;
+        if (!read_i32_le(data, size, header_size + static_cast<size_t>(i) * sizeof(int32_t), token)) {
+            return false;
+        }
+        tokens.push_back(static_cast<int>(token));
+    }
+    return true;
+}
+
+static bool parse_v3_prefill_ack(
+        const uint8_t * data,
+        size_t size,
+        uint32_t& request_id) {
+    constexpr size_t header_size = 1 + 2 * sizeof(uint32_t);
+    uint32_t metadata_len = 0;
+    return size >= header_size
+            && read_u32_le(data, size, 1, request_id)
+            && read_u32_le(data, size, 5, metadata_len)
+            && size == header_size + metadata_len;
+}
+
+static bool parse_v3_error(
+        const uint8_t * data,
+        size_t size,
+        uint32_t& request_id,
+        uint32_t& code,
+        std::string& message) {
+    constexpr size_t header_size = 1 + 3 * sizeof(uint32_t);
+    uint32_t message_len = 0;
+    if (size < header_size
+            || !read_u32_le(data, size, 1, request_id)
+            || !read_u32_le(data, size, 5, code)
+            || !read_u32_le(data, size, 9, message_len)
+            || size != header_size + message_len) {
+        return false;
+    }
+
+    message.assign(
+            reinterpret_cast<const char *>(data + header_size),
+            reinterpret_cast<const char *>(data + header_size + message_len));
+    return true;
+}
+
+static double update_ema_value(double previous, bool& ready, double value, double alpha) {
+    if (!ready) {
+        ready = true;
+        return value;
+    }
+    return alpha * value + (1.0 - alpha) * previous;
+}
+
+static int clamp_adaptive_n_draft(const CloudState& state, int value) {
+    return std::max(state.min_n_draft, std::min(state.max_n_draft, value));
+}
+
+static int litepp_confidence_bucket(double confidence) {
+    const double bounded = std::max(0.0, std::min(1.0, confidence));
+    return std::max(0, std::min(10, static_cast<int>(bounded / 0.1)));
+}
+
+static double litepp_calibrate_confidence_value(const CloudState& state, float confidence, int position) {
+    const double raw = std::max(0.0, std::min(1.0, static_cast<double>(confidence)));
+    const int bucket = litepp_confidence_bucket(raw);
+    const double bucket_rate = state.confidence_bucket_ready[bucket]
+            ? state.confidence_bucket_accept_ema[bucket]
+            : raw;
+    const bool position_ready = position >= 0
+            && position < static_cast<int>(state.position_accept_ready.size())
+            && state.position_accept_ready[position];
+    const double position_rate = position_ready
+            ? state.position_accept_ema[position]
+            : raw;
+    return std::max(0.0, std::min(1.0, 0.6 * bucket_rate + 0.3 * position_rate + 0.1 * raw));
+}
+
+static void litepp_update_calibrator(
+        CloudState& state,
+        const std::vector<float>& raw_confidences,
+        int accepted_draft_count) {
+    const int bounded_accepted = std::max(0, std::min(accepted_draft_count, static_cast<int>(raw_confidences.size())));
+    for (int i = 0; i < static_cast<int>(raw_confidences.size()); ++i) {
+        const double accepted = i < bounded_accepted ? 1.0 : 0.0;
+        const int bucket = litepp_confidence_bucket(raw_confidences[i]);
+        state.confidence_bucket_accept_ema[bucket] = update_ema_value(
+                state.confidence_bucket_accept_ema[bucket],
+                state.confidence_bucket_ready[bucket],
+                accepted,
+                state.ema_alpha);
+        if (i < static_cast<int>(state.position_accept_ema.size())) {
+            state.position_accept_ema[i] = update_ema_value(
+                    state.position_accept_ema[i],
+                    state.position_accept_ready[i],
+                    accepted,
+                    state.ema_alpha);
+        }
+    }
+}
+
+static std::string litepp_sha256_first16_hex(const std::string& payload) {
+    unsigned char hash[SHA256_DIGEST_LENGTH];
+    SHA256(reinterpret_cast<const unsigned char *>(payload.data()), payload.size(), hash);
+
+    std::ostringstream out;
+    out << std::hex << std::setfill('0');
+    for (int i = 0; i < 8; ++i) {
+        out << std::setw(2) << static_cast<int>(hash[i]);
+    }
+    return out.str();
+}
+
+static std::string litepp_json_string(const std::string& value) {
+    std::ostringstream out;
+    out << '"';
+    for (char c : value) {
+        if (c == '"' || c == '\\') {
+            out << '\\';
+        }
+        out << c;
+    }
+    out << '"';
+    return out.str();
+}
+
+static std::string litepp_hash_tokens(const llama_tokens& tokens) {
+    std::ostringstream out;
+    out << '[';
+    for (size_t i = 0; i < tokens.size(); ++i) {
+        if (i > 0) {
+            out << ',';
+        }
+        out << tokens[i];
+    }
+    out << ']';
+    return litepp_sha256_first16_hex(out.str());
+}
+
+static std::string litepp_url_quote(const std::string& value) {
+    std::ostringstream out;
+    out << std::uppercase << std::hex << std::setfill('0');
+    for (unsigned char c : value) {
+        const bool safe = (c >= 'a' && c <= 'z')
+                || (c >= 'A' && c <= 'Z')
+                || (c >= '0' && c <= '9')
+                || c == '-' || c == '_' || c == '.' || c == '~';
+        if (safe) {
+            out << static_cast<char>(c);
+        } else {
+            out << '%' << std::setw(2) << static_cast<int>(c);
+        }
+    }
+    return out.str();
+}
+
+static std::string litepp_build_icn_name_v2(
+        const llama_tokens& prefix_tokens,
+        const llama_tokens& draft_tokens,
+        int speculative_len) {
+    const std::string target_model = "qwen3-4b";
+    const std::string draft_model = "android-local-draft";
+    const std::string tokenizer_id = "qwen3-4b-tokenizer";
+    const std::string sampling_config = "{\"temperature\":0,\"top_k\":1}";
+    const std::string policy = "observe_only";
+
+    return "/6g-ai/heterospec/v2/"
+            + litepp_url_quote(target_model)
+            + "/"
+            + litepp_url_quote(draft_model)
+            + "/tok="
+            + litepp_sha256_first16_hex(litepp_json_string(tokenizer_id))
+            + "/sampler="
+            + litepp_sha256_first16_hex(sampling_config)
+            + "/policy="
+            + litepp_url_quote(policy)
+            + "/prefix="
+            + litepp_hash_tokens(prefix_tokens)
+            + "/draft="
+            + litepp_hash_tokens(draft_tokens)
+            + "/sl="
+            + std::to_string(speculative_len);
+}
+
+static std::string litepp_join_floats(const std::vector<float>& values) {
+    std::ostringstream out;
+    out << std::fixed << std::setprecision(3);
+    for (size_t i = 0; i < values.size(); ++i) {
+        if (i > 0) {
+            out << ',';
+        }
+        out << values[i];
+    }
+    return out.str();
+}
+
+static double adaspec_expected_tokens(const std::vector<float>& confidences) {
+    double total = 1.0;
+    double prefix = 1.0;
+    for (float confidence : confidences) {
+        const double bounded = std::max(0.0, std::min(1.0, static_cast<double>(confidence)));
+        prefix *= bounded;
+        total += prefix;
+    }
+    return total;
+}
+
+static double litepp_goodput(
+        const std::vector<float>& confidences,
+        double draft_per_token,
+        double verify_wait_time,
+        double network_time,
+        double queue_time,
+        double slo_tpot) {
+    if (confidences.empty()) {
+        return -1.0;
+    }
+
+    const double draft_time = std::max(0.0, draft_per_token) * confidences.size();
+    const double total_time = draft_time
+            + std::max(0.0, verify_wait_time)
+            + std::max(0.0, network_time)
+            + std::max(0.0, queue_time);
+    if (total_time <= 0.0) {
+        return -1.0;
+    }
+
+    const double expected = adaspec_expected_tokens(confidences);
+    const double estimated_tpot = total_time / expected;
+    if (slo_tpot > 0.0 && estimated_tpot > slo_tpot) {
+        return -1.0;
+    }
+
+    return expected / total_time;
+}
+
+struct LiteDraftResult {
+    llama_tokens tokens;
+    std::vector<float> confidences;
+    std::vector<float> calibrated_confidences;
+};
+
+static bool litepp_select_greedy_token(
+        llama_context * context,
+        const llama_vocab * vocab,
+        llama_token& token,
+        float& confidence) {
+    const float * logits = llama_get_logits_ith(context, -1);
+    const int n_vocab = llama_vocab_n_tokens(vocab);
+    if (!logits || n_vocab <= 0) {
+        return false;
+    }
+
+    int best_id = -1;
+    float best_logit = -std::numeric_limits<float>::infinity();
+    for (int i = 0; i < n_vocab; ++i) {
+        const float value = logits[i];
+        if (std::isfinite(value) && value > best_logit) {
+            best_logit = value;
+            best_id = i;
+        }
+    }
+    if (best_id < 0) {
+        return false;
+    }
+
+    double denom = 0.0;
+    for (int i = 0; i < n_vocab; ++i) {
+        const float value = logits[i];
+        if (std::isfinite(value)) {
+            denom += std::exp(static_cast<double>(value - best_logit));
+        }
+    }
+
+    token = static_cast<llama_token>(best_id);
+    confidence = denom > 0.0
+            ? static_cast<float>(1.0 / denom)
+            : 0.0f;
+    confidence = std::max(0.0f, std::min(1.0f, confidence));
+    return true;
+}
+
+static LiteDraftResult generate_litepp_local_draft(
+        CloudState& state,
+        llama_context * context,
+        const llama_vocab * vocab,
+        const llama_tokens& prompt_tgt,
+        llama_token id_last,
+        double draft_per_token,
+        double verify_wait_time,
+        double network_time,
+        double network_time_per_token,
+        double queue_time) {
+    LiteDraftResult result;
+    const int n_draft_max = clamp_adaptive_n_draft(state, state.max_n_draft);
+    result.tokens.reserve(n_draft_max);
+    result.confidences.reserve(n_draft_max);
+    result.calibrated_confidences.reserve(n_draft_max);
+
+    llama_batch batch = llama_batch_init(1, 0, 1);
+    const llama_pos n_past = static_cast<llama_pos>(prompt_tgt.size());
+
+    common_batch_clear(batch);
+    common_batch_add(batch, id_last, n_past, { 0 }, true);
+    if (llama_decode(context, batch) != 0) {
+        LOGe("Lite++ draft decode failed while syncing last token");
+        llama_batch_free(batch);
+        return result;
+    }
+
+    double best_goodput = -std::numeric_limits<double>::infinity();
+    bool found_feasible = false;
+
+    for (int i = 0; i < n_draft_max; ++i) {
+        llama_token id = 0;
+        float confidence = 0.0f;
+        if (!litepp_select_greedy_token(context, vocab, id, confidence)) {
+            LOGe("Lite++ draft failed to select token at position=%d", i);
+            break;
+        }
+
+        const float calibrated = static_cast<float>(
+                litepp_calibrate_confidence_value(state, confidence, i));
+
+        result.tokens.push_back(id);
+        result.confidences.push_back(confidence);
+        result.calibrated_confidences.push_back(calibrated);
+
+        const double candidate_network_time =
+                std::max(0.0, network_time)
+                + std::max(0.0, network_time_per_token) * result.tokens.size();
+        const double goodput = litepp_goodput(
+                result.calibrated_confidences,
+                draft_per_token,
+                verify_wait_time,
+                candidate_network_time,
+                queue_time,
+                state.slo_tpot);
+
+        if (goodput > best_goodput) {
+            best_goodput = goodput;
+            found_feasible = goodput >= 0.0;
+            if (!found_feasible) {
+                break;
+            }
+        } else if (found_feasible) {
+            result.tokens.pop_back();
+            result.confidences.pop_back();
+            result.calibrated_confidences.pop_back();
+            break;
+        }
+
+        if (n_draft_max <= static_cast<int>(result.tokens.size())) {
+            break;
+        }
+
+        common_batch_clear(batch);
+        common_batch_add(batch, id, n_past + i + 1, { 0 }, true);
+        if (llama_decode(context, batch) != 0) {
+            LOGe("Lite++ draft decode failed after token position=%d", i);
+            break;
+        }
+    }
+
+    llama_batch_free(batch);
+    return result;
+}
+
+static void update_adaptive_n_draft(
+        CloudState* state,
+        double draft_time,
+        int draft_count,
+        double verify_wait_time,
+        int accepted_draft_count,
+        const std::vector<float>& confidence_scores,
+        const std::vector<float>& calibrated_confidence_scores,
+        double network_time,
+        double queue_time,
+        int payload_bytes) {
+    if (!state || draft_count <= 0) {
+        return;
+    }
+
+    const double draft_per_token = std::max(0.0, draft_time) / draft_count;
+    if (!std::isfinite(draft_per_token) || draft_per_token <= 0.0) {
+        return;
+    }
+
+    const double wait_time = std::max(0.0, verify_wait_time);
+    const int bounded_accepted = std::max(0, std::min(accepted_draft_count, draft_count));
+    const double accept_rate = static_cast<double>(bounded_accepted) / draft_count;
+
+    state->draft_token_time_ema = update_ema_value(
+            state->draft_token_time_ema,
+            state->draft_token_time_ema_ready,
+            draft_per_token,
+            state->ema_alpha);
+    state->verify_wait_time_ema = update_ema_value(
+            state->verify_wait_time_ema,
+            state->verify_wait_time_ema_ready,
+            wait_time,
+            state->ema_alpha);
+    state->accept_rate_ema =
+            state->ema_alpha * accept_rate + (1.0 - state->ema_alpha) * state->accept_rate_ema;
+    state->rtt_ema = update_ema_value(
+            state->rtt_ema,
+            state->rtt_ema_ready,
+            std::max(0.001, std::min(0.250, network_time)),
+            state->ema_alpha);
+    const double observed_uplink = payload_bytes > 0 && network_time > 0.001
+            ? payload_bytes / network_time
+            : state->default_uplink_bytes_per_second;
+    state->uplink_bytes_per_second_ema = update_ema_value(
+            state->uplink_bytes_per_second_ema,
+            state->uplink_bytes_per_second_ema_ready,
+            std::max(1.0, observed_uplink),
+            state->ema_alpha);
+    state->queue_time_ema = update_ema_value(
+            state->queue_time_ema,
+            state->queue_time_ema_ready,
+            std::max(0.0, queue_time),
+            state->ema_alpha);
+    state->litepp_total_wasted_tokens += std::max(0, draft_count - bounded_accepted);
+    state->litepp_total_payload_bytes += std::max(0, payload_bytes);
+    litepp_update_calibrator(*state, confidence_scores, bounded_accepted);
+
+    state->adaptive_n_draft = clamp_adaptive_n_draft(*state, draft_count);
+
+    const double expected_tokens = adaspec_expected_tokens(calibrated_confidence_scores.empty()
+            ? confidence_scores
+            : calibrated_confidence_scores);
+    const double total_time = std::max(0.0, draft_time)
+            + wait_time
+            + std::max(0.0, network_time)
+            + std::max(0.0, queue_time);
+    const double estimated_tpot = expected_tokens > 0.0 ? total_time / expected_tokens : total_time;
+    const double goodput = total_time > 0.0 ? expected_tokens / total_time : 0.0;
+    const double last_confidence = confidence_scores.empty() ? 0.0 : confidence_scores.back();
+    const double last_calibrated = calibrated_confidence_scores.empty() ? last_confidence : calibrated_confidence_scores.back();
+
+    LOGi("litepp_k=%d litepp_goodput=%.3f litepp_estimated_tpot=%.3fs litepp_raw_conf=%.3f litepp_calibrated_p=%.3f litepp_expected_tokens=%.3f litepp_network_time=%.3fs litepp_queue_time=%.3fs litepp_payload_bytes=%d litepp_wasted_tokens=%lld accept_rate=%.3f draft_time=%.3fs verify_wait_time=%.3fs",
+            state->adaptive_n_draft,
+            goodput,
+            estimated_tpot,
+            last_confidence,
+            last_calibrated,
+            expected_tokens,
+            network_time,
+            queue_time,
+            payload_bytes,
+            static_cast<long long>(state->litepp_total_wasted_tokens),
+            accept_rate,
+            draft_time,
+            verify_wait_time);
+}
+
+bool init_websocket(CloudState& state, const std::string& url) {
+    if (state.is_connected) return true;
+
+    state.client.clear_access_channels(websocketpp::log::alevel::all);
+    state.client.set_access_channels(
+            websocketpp::log::alevel::connect |
+            websocketpp::log::alevel::disconnect |
+            websocketpp::log::alevel::fail
+    );
+
+    state.client.clear_error_channels(websocketpp::log::elevel::all);
+    state.client.set_error_channels(
+            websocketpp::log::elevel::rerror |
+            websocketpp::log::elevel::fatal
+    );
+
+    state.client.set_max_message_size(1024 * 1024);
+    state.client.set_max_http_body_size(1024 * 1024);
+    state.client.init_asio();
+    state.client.start_perpetual();
+
+    state.client.set_message_handler([&state](websocketpp::connection_hdl hdl, ws_client::message_ptr msg) {
+        (void) hdl;
+        try {
+            const auto* data = reinterpret_cast<const uint8_t*>(msg->get_payload().data());
+            const size_t size = msg->get_payload().size();
+            if (size == 0) {
+                return;
+            }
+
+            if (data[0] == heterospec_v3::MSG_PREFILL_ACK) {
+                uint32_t request_id = 0;
+                if (!parse_v3_prefill_ack(data, size, request_id)) {
+                    LOGe("Malformed v3 prefill ack");
+                    return;
+                }
+                std::unique_lock<std::mutex> lock(state.mutex);
+                if (request_id != state.pending_request_id) {
+                    LOGe("Ignoring stale prefill ack request_id=%u pending=%u",
+                            request_id,
+                            state.pending_request_id);
+                    return;
+                }
+                state.response_request_id = request_id;
+                state.has_prefill_ack = true;
+                state.pending_request_id = 0;
+                state.cv.notify_one();
+                return;
+            }
+
+            if (data[0] == heterospec_v3::MSG_VERIFY_ACK) {
+                std::vector<int> tokens;
+                uint32_t request_id = 0;
+                int accepted_draft_count = 0;
+                uint32_t verify_us = 0;
+                uint32_t queue_us = 0;
+                uint32_t flags = 0;
+                if (!parse_v3_verify_ack(
+                            data,
+                            size,
+                            request_id,
+                            accepted_draft_count,
+                            verify_us,
+                            queue_us,
+                            flags,
+                            tokens)) {
+                    LOGe("Malformed v3 verify ack");
+                    return;
+                }
+
+                std::unique_lock<std::mutex> lock(state.mutex);
+                if (request_id != state.pending_request_id) {
+                    LOGe("Ignoring stale verify ack request_id=%u pending=%u",
+                            request_id,
+                            state.pending_request_id);
+                    return;
+                }
+                state.accepted_tokens = std::move(tokens);
+                state.response_request_id = request_id;
+                state.response_accepted_draft_count = accepted_draft_count;
+                state.response_verify_us = verify_us;
+                state.response_queue_us = queue_us;
+                state.response_flags = flags;
+                state.has_verify_response = true;
+                state.pending_request_id = 0;
+                state.cv.notify_one();
+                return;
+            }
+
+            if (data[0] == heterospec_v3::MSG_ERROR) {
+                uint32_t request_id = 0;
+                uint32_t code = 0;
+                std::string message;
+                if (!parse_v3_error(data, size, request_id, code, message)) {
+                    LOGe("Malformed v3 error message");
+                    return;
+                }
+
+                std::unique_lock<std::mutex> lock(state.mutex);
+                if (state.pending_request_id != 0 && request_id != state.pending_request_id) {
+                    LOGe("Ignoring stale error request_id=%u pending=%u",
+                            request_id,
+                            state.pending_request_id);
+                    return;
+                }
+                state.error_request_id = request_id;
+                state.error_code = code;
+                state.error_message = std::move(message);
+                state.has_error = true;
+                state.pending_request_id = 0;
+                state.cv.notify_one();
+            }
+        } catch (const std::exception& e) {
+            LOGe("Error parsing message: %s", e.what());
+        }
+    });
+
+    state.client.set_open_handler([&state](websocketpp::connection_hdl hdl) {
+        std::unique_lock<std::mutex> lock(state.mutex);
+        state.connection = hdl;
+        state.is_connected = true;
+        state.connection_ready = true;
+        state.connect_cv.notify_all();
+        LOGi("WebSocket connection opened");
+    });
+
+    state.client.set_fail_handler([&state](websocketpp::connection_hdl hdl) {
+        (void) hdl;
+        std::unique_lock<std::mutex> lock(state.mutex);
+        state.is_connected = false;
+        state.connection_ready = true;
+        state.connect_cv.notify_all();
+        state.cv.notify_all();
+        LOGe("WebSocket connection failed");
+    });
+
+    state.client.set_close_handler([&state](websocketpp::connection_hdl hdl) {
+        (void) hdl;
+        std::unique_lock<std::mutex> lock(state.mutex);
+        state.is_connected = false;
+        state.cv.notify_all();
+        LOGi("WebSocket connection closed");
+    });
+
+    websocketpp::lib::error_code ec;
+    auto con = state.client.get_connection(url, ec);
+    if (ec) {
+        LOGe("Failed to create connection: %s", ec.message().c_str());
+        state.client.stop_perpetual();
+        return false;
+    }
+
+    state.client.connect(con);
+
+    state.client_thread = std::thread([&state]() {
+        try {
+            state.client.run();
+        } catch (const std::exception& e) {
+            LOGe("WebSocket client thread error: %s", e.what());
+        }
+    });
+
+    {
+        std::unique_lock<std::mutex> lock(state.mutex);
+        if (!state.connect_cv.wait_for(lock, std::chrono::seconds(15), [&state] {
+            return state.connection_ready;
+        })) {
+            LOGe("WebSocket connection timeout");
+            lock.unlock();
+            state.client.stop_perpetual();
+            state.client.stop();
+            if (state.client_thread.joinable()) {
+                state.client_thread.join();
+            }
+            return false;
+        }
+        if (!state.is_connected) {
+            LOGe("WebSocket connection did not open");
+            lock.unlock();
+            state.client.stop_perpetual();
+            state.client.stop();
+            if (state.client_thread.joinable()) {
+                state.client_thread.join();
+            }
+            return false;
+        }
+    }
+
+    return true;
+}
+
+static void shutdown_cloud_state(CloudState& state) {
+    if (state.is_connected) {
+        try {
+            const uint32_t request_id = cloud_next_request_id(state);
+            const auto close_msg = pack_close_request_v3(request_id);
+            state.client.send(
+                    state.connection,
+                    close_msg.data(),
+                    close_msg.size(),
+                    websocketpp::frame::opcode::binary);
+        } catch (const std::exception& e) {
+            LOGe("Exception while sending close message: %s", e.what());
+        }
+
+        try {
+            websocketpp::lib::error_code ec;
+            state.client.close(
+                    state.connection,
+                    websocketpp::close::status::normal,
+                    "heterospec cleanup",
+                    ec);
+            if (ec) {
+                LOGe("Exception while closing websocket: %s", ec.message().c_str());
+            }
+        } catch (const std::exception& e) {
+            LOGe("Exception while closing websocket: %s", e.what());
+        }
+    }
+
+    state.client.stop_perpetual();
+    state.client.stop();
+    if (state.client_thread.joinable()) {
+        state.client_thread.join();
+    }
+    state.is_connected = false;
+    state.connection_ready = false;
+}
+
+// 添加清理函数
+extern "C" JNIEXPORT void JNICALL
+Java_android_llama_cpp_LLamaAndroid_heterospec_1cleanup(JNIEnv *env, jobject thiz) {
+    jclass cls = env->GetObjectClass(thiz);
+    jfieldID fid = env->GetFieldID(cls, "nativeStatePtr", "J");
+    auto* state = reinterpret_cast<CloudState*>(env->GetLongField(thiz, fid));
+
+    if (state) {
+        shutdown_cloud_state(*state);
+        delete state;
+        env->SetLongField(thiz, fid, 0);
+    }
+}
+
+// 核心函数1: 初始化推测解码
+extern "C" JNIEXPORT jint JNICALL
+Java_android_llama_cpp_LLamaAndroid_heterospec_1init(
+        JNIEnv *env,
+        jobject thiz,
+        jlong context_pointer,
+        jlong batch_pointer,
+        jstring jtext,
+        jboolean format_chat,
+        jint n_len,
+        jstring server_url)
+{
+    cached_token_chars.clear();
+    const auto text = env->GetStringUTFChars(jtext, 0);
+    const auto context = reinterpret_cast<llama_context *>(context_pointer);
+    const auto batch = reinterpret_cast<llama_batch *>(batch_pointer);
+
+    bool parse_special = (format_chat == JNI_TRUE);
+    const auto tokens_list = common_tokenize(context, text, true, parse_special);
+    if (tokens_list.size() < 2) {
+        LOGe("heterospec_init requires at least two prompt tokens");
+        env->ReleaseStringUTFChars(jtext, text);
+        return -2;
+    }
+
+    const char *url = env->GetStringUTFChars(server_url, nullptr);
+    auto state_owner = std::make_unique<CloudState>();
+    auto* state = state_owner.get();
+    state->server_url = url;
+
+    // 初始化WebSocket连接
+    if (!init_websocket(*state, url)) {
+        env->ReleaseStringUTFChars(server_url, url);
+        env->ReleaseStringUTFChars(jtext, text);
+        return -2;
+    }
+
+    // 保存 prompt tokens 和最后一个 token
+    llama_tokens prompt_tgt(tokens_list.begin(), tokens_list.end() - 1);
+    prompt_tgt.reserve(llama_n_ctx(context));
+    state->n_past = prompt_tgt.size() - 1;
+    state->prompt_tokens = prompt_tgt;
+    state->last_token = tokens_list.back();
+
+    // 发送prefill请求
+    try {
+        if (!state->is_connected || !state->connection_ready) {
+            LOGe("WebSocket not connected or not ready");
+            env->ReleaseStringUTFChars(server_url, url);
+            env->ReleaseStringUTFChars(jtext, text);
+            return -2;
+        }
+
+        const uint32_t request_id = cloud_next_request_id(*state);
+        const auto binary_msg = pack_token_request_v3(
+                heterospec_v3::MSG_PREFILL_REQUEST,
+                request_id,
+                tokens_list);
+        cloud_prepare_pending(*state, request_id);
+
+        state->client.send(state->connection, binary_msg.data(), binary_msg.size(), websocketpp::frame::opcode::binary);
+        LOGi("Prefill v3 message sent successfully request_id=%u", request_id);
+    } catch (const std::exception& e) {
+        LOGe("Exception while sending message: %s", e.what());
+        shutdown_cloud_state(*state);
+        env->ReleaseStringUTFChars(server_url, url);
+        env->ReleaseStringUTFChars(jtext, text);
+        return -2;
+    }
+
+    //  prefill draft model
+    common_batch_clear(*batch);
+
+    // evaluate the initial prompt
+    for (auto i = 0; i < prompt_tgt.size(); i++) {
+        common_batch_add(*batch, prompt_tgt[i], i, { 0 }, false);
+    }
+
+    // llama_decode will output logits only for the last token of the prompt
+    batch->logits[batch->n_tokens - 1] = true;
+
+    if (llama_decode(context, *batch) != 0) {
+        LOGe("llama_decode() failed");
+    }
+
+    {
+        std::unique_lock<std::mutex> lock(state->mutex);
+        const bool ready = state->cv.wait_for(lock, std::chrono::seconds(30), [state] {
+            return state->has_prefill_ack || state->has_error;
+        });
+        if (!ready || state->has_error) {
+            LOGe("Prefill v3 failed ready=%d error_code=%u error=%s",
+                    ready ? 1 : 0,
+                    state->error_code,
+                    state->error_message.c_str());
+            lock.unlock();
+            shutdown_cloud_state(*state);
+            env->ReleaseStringUTFChars(server_url, url);
+            env->ReleaseStringUTFChars(jtext, text);
+            return -2;
+        }
+    }
+
+    // 将状态指针保存到Java对象中
+    jclass cls = env->GetObjectClass(thiz);
+    jfieldID fid = env->GetFieldID(cls, "nativeStatePtr", "J");
+    env->SetLongField(thiz, fid, reinterpret_cast<jlong>(state_owner.release()));
+
+    env->ReleaseStringUTFChars(server_url, url);
+    env->ReleaseStringUTFChars(jtext, text);
+
+    return batch->n_tokens;
+}
+
+// 核心函数2: 协同解码循环
+extern "C" JNIEXPORT jstring JNICALL
+Java_android_llama_cpp_LLamaAndroid_heterospec_1loop(
+        JNIEnv *env, jobject thiz,
+        jlong context_pointer, jint n_len,
+        jobject intvar_ncur)
+{
+    // 从Java对象获取状态指针
+    jclass cls = env->GetObjectClass(thiz);
+    jfieldID fid = env->GetFieldID(cls, "nativeStatePtr", "J");
+    auto* state = reinterpret_cast<CloudState*>(env->GetLongField(thiz, fid));
+
+    if (!la_int_var) la_int_var = env->GetObjectClass(intvar_ncur);
+    if (!la_int_var_value) la_int_var_value = env->GetMethodID(la_int_var, "getValue", "()I");
+    if (!la_int_var_inc) la_int_var_inc = env->GetMethodID(la_int_var, "inc", "()V");
+
+    if (!state || !state->is_connected) {
+        return env->NewStringUTF("");
+    }
+
+    // 1. 本地生成推测token (使用llama.cpp的API)
+    const auto context = reinterpret_cast<llama_context *>(context_pointer);
+    const auto model = llama_get_model(context);
+    const auto vocab = llama_model_get_vocab(model);
+
+    // 使用保存的状态
+    const auto& prompt_tgt = state->prompt_tokens;
+    const auto id_last = state->last_token;
+
+    // 生成草稿token
+    auto start1 = std::chrono::high_resolution_clock::now();
+    const double estimated_draft_per_token = state->draft_token_time_ema_ready
+            ? state->draft_token_time_ema
+            : state->default_draft_per_token;
+    const double estimated_verify_wait_time = state->verify_wait_time_ema_ready
+            ? state->verify_wait_time_ema
+            : state->default_verify_wait_time;
+    const double estimated_rtt = state->rtt_ema_ready
+            ? state->rtt_ema
+            : state->default_rtt;
+    const double estimated_uplink = state->uplink_bytes_per_second_ema_ready
+            ? state->uplink_bytes_per_second_ema
+            : state->default_uplink_bytes_per_second;
+    const double estimated_network_time = estimated_rtt + 1.0 / std::max(1.0, estimated_uplink);
+    const double estimated_network_time_per_token = 4.0 / std::max(1.0, estimated_uplink);
+    const double estimated_queue_time = state->queue_time_ema_ready
+            ? state->queue_time_ema
+            : 0.0;
+    LiteDraftResult draft_result = generate_litepp_local_draft(
+            *state,
+            context,
+            vocab,
+            prompt_tgt,
+            id_last,
+            estimated_draft_per_token,
+            estimated_verify_wait_time,
+            estimated_network_time,
+            estimated_network_time_per_token,
+            estimated_queue_time);
+    llama_tokens draft_tokens = std::move(draft_result.tokens);
+    std::vector<float> draft_confidences = std::move(draft_result.confidences);
+    std::vector<float> calibrated_confidences = std::move(draft_result.calibrated_confidences);
+    state->adaptive_n_draft = clamp_adaptive_n_draft(*state, static_cast<int>(draft_tokens.size()));
+    if (draft_tokens.empty()) {
+        LOGe("Lite++ draft produced no tokens");
+        return env->NewStringUTF("");
+    }
+    const std::string litepp_icn_name = litepp_build_icn_name_v2(prompt_tgt, draft_tokens, static_cast<int>(draft_tokens.size()));
+    LOGi("litepp_icn_name=%s", litepp_icn_name.c_str());
+    LOGi("litepp_raw_conf=%s litepp_calibrated_p=%s",
+            litepp_join_floats(draft_confidences).c_str(),
+            litepp_join_floats(calibrated_confidences).c_str());
+    try {
+        const uint32_t request_id = cloud_next_request_id(*state);
+        const auto binary_msg = pack_token_request_v3(
+                heterospec_v3::MSG_VERIFY_REQUEST,
+                request_id,
+                draft_tokens);
+        const int payload_bytes = static_cast<int>(binary_msg.size());
+
+        auto end1 = std::chrono::high_resolution_clock::now();
+        double draft_time = std::chrono::duration<double>(end1 - start1).count();
+        state->draft_times.push_back(draft_time);
+
+        cloud_prepare_pending(*state, request_id);
+        auto start = std::chrono::high_resolution_clock::now();
+
+        state->client.send(state->connection,
+            binary_msg.data(),
+            binary_msg.size(),
+            websocketpp::frame::opcode::binary);
+
+        llama_tokens final_tokens;
+        const int draft_count = static_cast<int>(draft_tokens.size());
+        int accepted_draft_count = 0;
+        double verify_time = 0.0;
+        double cloud_verify_time = 0.0;
+        double queue_time = 0.0;
+
+        std::unique_lock<std::mutex> lock(state->mutex);
+        const bool ready = state->cv.wait_for(lock, std::chrono::milliseconds(1000), [state] {
+            return state->has_verify_response || state->has_error || !state->is_connected;
+        });
+        if (!ready) {
+            LOGe("Verify v3 timeout request_id=%u", request_id);
+            state->pending_request_id = 0;
+            state->is_connected = false;
+            lock.unlock();
+            state->client.stop_perpetual();
+            state->client.stop();
+            return env->NewStringUTF("");
+        }
+        if (state->has_error) {
+            LOGe("Verify v3 error request_id=%u code=%u message=%s",
+                    state->error_request_id,
+                    state->error_code,
+                    state->error_message.c_str());
+            return env->NewStringUTF("");
+        }
+        if (state->has_verify_response) {
+            auto end = std::chrono::high_resolution_clock::now();
+            verify_time = std::chrono::duration<double>(end - start).count();
+            final_tokens = std::move(state->accepted_tokens);
+            accepted_draft_count = std::max(0, std::min(state->response_accepted_draft_count, draft_count));
+            cloud_verify_time = state->response_verify_us > 0
+                    ? static_cast<double>(state->response_verify_us) / 1000000.0
+                    : std::max(0.0, verify_time - estimated_network_time);
+            queue_time = static_cast<double>(state->response_queue_us) / 1000000.0;
+            state->accepted_tokens.clear();
+            state->has_verify_response = false;
+            state->response_accepted_draft_count = 0;
+            state->response_verify_us = 0;
+            state->response_queue_us = 0;
+            LOGi("Verification roundtrip=%.3fs cloud_verify=%.3fs queue=%.3fs request_id=%u",
+                    verify_time,
+                    cloud_verify_time,
+                    queue_time,
+                    request_id);
+        } else {
+            state->pending_request_id = 0;
+        }
+        lock.unlock();
+
+        if (final_tokens.empty()) {
+            LOGe("Verify v3 returned no tokens request_id=%u", request_id);
+            return env->NewStringUTF("");
+        }
+
+        const double observed_network_time = std::max(
+                0.001,
+                verify_time - cloud_verify_time - queue_time);
+            update_adaptive_n_draft(
+                    state,
+                    draft_time,
+                    draft_count,
+                    cloud_verify_time,
+                    accepted_draft_count,
+                    draft_confidences,
+                    calibrated_confidences,
+                    observed_network_time,
+                    queue_time,
+                    payload_bytes);
+            state->prompt_tokens.insert(state->prompt_tokens.end(), state->last_token);
+            state->last_token = final_tokens.back();
+            state->prompt_tokens.insert(state->prompt_tokens.end(), final_tokens.begin(), final_tokens.end() - 1);
+            state->n_past += final_tokens.size();
+
+            // 重置状态
+            state->accepted_tokens.clear();
+            llama_memory_seq_rm(llama_get_memory(context), 0, state->n_past + 1, -1);
+
+            // 处理输出
+            for (const auto& token : final_tokens) {
+                const auto n_cur = env->CallIntMethod(intvar_ncur, la_int_var_value);
+
+                if (llama_vocab_is_eog(vocab, token) || n_cur >= n_len) {
+                    if (!state->draft_times.empty()) {
+                        double total_draft_time = 0.0;
+                        for (double time : state->draft_times) {
+                            total_draft_time += time;
+                        }
+                        double avg_draft_time = total_draft_time / state->draft_times.size();
+                        LOGi("Average draft time: %.3fs over %zu iterations", avg_draft_time, state->draft_times.size());
+                    }
+
+                    if (is_valid_utf8(cached_token_chars.c_str())) {
+                        cached_token_chars += "[eog]"; // 添加字符串形式的nullptr作为终止标志
+                        auto result = env->NewStringUTF(cached_token_chars.c_str());
+                        LOGi("Generated text: %s", cached_token_chars.c_str());
+                        cached_token_chars.clear();
+                        return result;
+                    } else {
+                        return nullptr;
+                    }
+                }
+
+                env->CallVoidMethod(intvar_ncur, la_int_var_inc);
+                cached_token_chars += common_token_to_piece(context, token);
+            }
+
+            // 返回生成的文本
+            if (is_valid_utf8(cached_token_chars.c_str())) {
+                auto result = env->NewStringUTF(cached_token_chars.c_str());
+                LOGi("Generated text: %s", cached_token_chars.c_str());
+                cached_token_chars.clear();
+                return result;
+            } else {
+                return env->NewStringUTF("");
+            }
+    } catch (const std::exception& e) {
+        LOGe("Exception in heterospec_loop: %s", e.what());
+    }
+
+    return env->NewStringUTF("");
+}

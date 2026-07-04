@@ -7,7 +7,7 @@ android {
     namespace = "com.arm.aichat"
     compileSdk = 36
 
-    ndkVersion = "29.0.13113456"
+    ndkVersion = "27.0.12077973"
 
     defaultConfig {
         minSdk = 33
@@ -42,7 +42,7 @@ android {
     externalNativeBuild {
         cmake {
             path("src/main/cpp/CMakeLists.txt")
-            version = "3.31.6"
+            version = "3.22.1"
         }
     }
     compileOptions {

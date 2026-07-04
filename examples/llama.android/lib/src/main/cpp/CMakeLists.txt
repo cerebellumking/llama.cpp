@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.31.6)
+cmake_minimum_required(VERSION 3.22.1)
 
 project("ai-chat" VERSION 1.0.0 LANGUAGES C CXX)
 
@@ -33,8 +33,18 @@ endif()
 set(LLAMA_SRC ${CMAKE_CURRENT_LIST_DIR}/../../../../../../)
 add_subdirectory(${LLAMA_SRC} build-llama)
 
+if(NOT DEFINED OPENSSL_ROOT_DIR OR "${OPENSSL_ROOT_DIR}" STREQUAL "")
+    set(OPENSSL_ROOT_DIR "$ENV{OPENSSL_ROOT_DIR}")
+endif()
+if(NOT DEFINED OPENSSL_ROOT_DIR OR "${OPENSSL_ROOT_DIR}" STREQUAL "")
+    set(OPENSSL_ROOT_DIR "/Users/joe/Documents/软工课程/大四/科研/研一下/HeteroSpec/android_openssl/ssl_3/${ANDROID_ABI}")
+endif()
+
+add_compile_definitions(ASIO_STANDALONE)
+
 add_library(${CMAKE_PROJECT_NAME} SHARED
-        ai_chat.cpp)
+        ai_chat.cpp
+        llama_compat.cpp)
 
 target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
         GGML_SYSTEM_ARCH=${GGML_SYSTEM_ARCH}
@@ -47,10 +57,15 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
         ${LLAMA_SRC}/common
         ${LLAMA_SRC}/include
         ${LLAMA_SRC}/ggml/include
-        ${LLAMA_SRC}/ggml/src)
+        ${LLAMA_SRC}/ggml/src
+        ${OPENSSL_ROOT_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/asio/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/websocketpp)
 
 target_link_libraries(${CMAKE_PROJECT_NAME}
         llama
         llama-common
         android
+        ${OPENSSL_ROOT_DIR}/libssl_3.so
+        ${OPENSSL_ROOT_DIR}/libcrypto_3.so
         log)
