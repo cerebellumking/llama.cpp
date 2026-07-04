@@ -1,18 +1,18 @@
 [versions]
 
 # Plugins
-agp = "8.13.2"
-kotlin = "2.3.0"
+agp = "8.6.0"
+kotlin = "2.0.20"
 
 # AndroidX
-activity = "1.12.2"
-appcompat = "1.7.1"
-core-ktx = "1.17.0"
-constraint-layout = "2.2.1"
-datastore-preferences = "1.2.0"
+activity = "1.9.3"
+appcompat = "1.7.0"
+core-ktx = "1.13.1"
+constraint-layout = "2.1.4"
+datastore-preferences = "1.1.1"
 
 # Material
-material = "1.13.0"
+material = "1.12.0"
 
 # Testing
 espresso-core = "3.7.0"
