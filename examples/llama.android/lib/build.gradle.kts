@@ -1,7 +1,18 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.library)
     alias(libs.plugins.jetbrains.kotlin.android)
 }
+
+val localProperties = Properties()
+val localPropertiesFile = rootProject.file("local.properties")
+if (localPropertiesFile.isFile) {
+    localPropertiesFile.inputStream().use { localProperties.load(it) }
+}
+
+fun heteroSpecLocalProperty(name: String): String =
+    (providers.gradleProperty(name).orNull ?: localProperties.getProperty(name) ?: "").trim()
 
 android {
     namespace = "com.arm.aichat"
@@ -33,6 +44,13 @@ android {
                 arguments += "-DGGML_BACKEND_DL=ON"
                 arguments += "-DGGML_CPU_ALL_VARIANTS=ON"
                 arguments += "-DGGML_LLAMAFILE=OFF"
+
+                heteroSpecLocalProperty("heterospec.kleidiai.archive").takeIf { it.isNotEmpty() }?.let {
+                    arguments += "-DHETEROSPEC_KLEIDIAI_ARCHIVE=$it"
+                }
+                heteroSpecLocalProperty("heterospec.kleidiai.sourceDir").takeIf { it.isNotEmpty() }?.let {
+                    arguments += "-DHETEROSPEC_KLEIDIAI_SOURCE_DIR=$it"
+                }
             }
         }
         aarMetadata {
