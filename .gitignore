@@ -146,6 +146,16 @@ flake.lock
 
 /*.code-workspace
 /.windsurf/
+/examples/llama.android/.vscode/
+
+# Local Android Studio / generated project scratch
+/examples/llama.android/llama/
+
+# Local server build and frontend dependency output
+/tools/server/build/
+/tools/server/third_party/
+/tools/server/webui/
+
 # emscripten
 a.out.*
 
