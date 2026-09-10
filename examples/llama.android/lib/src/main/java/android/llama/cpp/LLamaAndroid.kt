@@ -132,26 +132,30 @@ class LLamaAndroid {
                     emit(Pair("Heterospec init failed", ncur.value))
                     return@flow
                 }
-                var curTokens = ncur.value
-                while (ncur.value <= promptLen + nlen) {
-                    val str = heterospec_loop(state.context, promptLen + nlen, ncur)
-                    if (str == null) {
-                        break
-                    }
-                    if (str.contains("[eog]")) {
-                        val finalText = str.replace("[eog]", "")
-                        if (finalText.isNotEmpty()) {
-                            val totalTokens = ncur.value - curTokens
-                            emit(Pair(finalText, totalTokens))
+                try {
+                    var curTokens = ncur.value
+                    while (ncur.value <= promptLen + nlen) {
+                        val str = heterospec_loop(state.context, promptLen + nlen, ncur)
+                        if (str == null) {
+                            break
                         }
-                        break
-                    }
+                        if (str.contains("[eog]")) {
+                            val finalText = str.replace("[eog]", "")
+                            if (finalText.isNotEmpty()) {
+                                val totalTokens = ncur.value - curTokens
+                                emit(Pair(finalText, totalTokens))
+                            }
+                            break
+                        }
 
-                    val totalTokens = ncur.value - curTokens
-                    curTokens = ncur.value
-                    emit(Pair(str, totalTokens))
+                        val totalTokens = ncur.value - curTokens
+                        curTokens = ncur.value
+                        emit(Pair(str, totalTokens))
+                    }
+                } finally {
+                    kv_cache_clear(state.context)
+                    heterospec_cleanup()
                 }
-                kv_cache_clear(state.context)
             }
             else -> {}
         }
@@ -201,7 +205,7 @@ class LLamaAndroid {
     }
 
     companion object {
-        const val DEFAULT_HETERO_SERVER_URL = "ws://122.51.47.91:22776/ws/predict/binary/v2"
+        const val DEFAULT_HETERO_SERVER_URL = "ws://122.51.47.91:22776/ws/predict/binary/v3"
 
         private class IntVar(value: Int) {
             @Volatile

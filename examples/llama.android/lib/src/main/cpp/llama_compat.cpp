@@ -473,8 +473,8 @@ struct CloudState {
     std::array<bool, 11> confidence_bucket_ready{};
     std::array<double, 6> position_accept_ema{};
     std::array<bool, 6> position_accept_ready{};
-    int64_t litepp_total_wasted_tokens = 0;
-    int64_t litepp_total_payload_bytes = 0;
+    int64_t icn_multi_total_wasted_tokens = 0;
+    int64_t icn_multi_total_payload_bytes = 0;
 };
 
 static uint32_t cloud_next_request_id(CloudState& state) {
@@ -589,14 +589,14 @@ static int clamp_adaptive_n_draft(const CloudState& state, int value) {
     return std::max(state.min_n_draft, std::min(state.max_n_draft, value));
 }
 
-static int litepp_confidence_bucket(double confidence) {
+static int icn_multi_confidence_bucket(double confidence) {
     const double bounded = std::max(0.0, std::min(1.0, confidence));
     return std::max(0, std::min(10, static_cast<int>(bounded / 0.1)));
 }
 
-static double litepp_calibrate_confidence_value(const CloudState& state, float confidence, int position) {
+static double icn_multi_calibrate_confidence_value(const CloudState& state, float confidence, int position) {
     const double raw = std::max(0.0, std::min(1.0, static_cast<double>(confidence)));
-    const int bucket = litepp_confidence_bucket(raw);
+    const int bucket = icn_multi_confidence_bucket(raw);
     const double bucket_rate = state.confidence_bucket_ready[bucket]
             ? state.confidence_bucket_accept_ema[bucket]
             : raw;
@@ -609,14 +609,14 @@ static double litepp_calibrate_confidence_value(const CloudState& state, float c
     return std::max(0.0, std::min(1.0, 0.6 * bucket_rate + 0.3 * position_rate + 0.1 * raw));
 }
 
-static void litepp_update_calibrator(
+static void icn_multi_update_calibrator(
         CloudState& state,
         const std::vector<float>& raw_confidences,
         int accepted_draft_count) {
     const int bounded_accepted = std::max(0, std::min(accepted_draft_count, static_cast<int>(raw_confidences.size())));
     for (int i = 0; i < static_cast<int>(raw_confidences.size()); ++i) {
         const double accepted = i < bounded_accepted ? 1.0 : 0.0;
-        const int bucket = litepp_confidence_bucket(raw_confidences[i]);
+        const int bucket = icn_multi_confidence_bucket(raw_confidences[i]);
         state.confidence_bucket_accept_ema[bucket] = update_ema_value(
                 state.confidence_bucket_accept_ema[bucket],
                 state.confidence_bucket_ready[bucket],
@@ -632,7 +632,7 @@ static void litepp_update_calibrator(
     }
 }
 
-static std::string litepp_sha256_first16_hex(const std::string& payload) {
+static std::string icn_multi_sha256_first16_hex(const std::string& payload) {
     unsigned char hash[SHA256_DIGEST_LENGTH];
     SHA256(reinterpret_cast<const unsigned char *>(payload.data()), payload.size(), hash);
 
@@ -644,7 +644,7 @@ static std::string litepp_sha256_first16_hex(const std::string& payload) {
     return out.str();
 }
 
-static std::string litepp_json_string(const std::string& value) {
+static std::string icn_multi_json_string(const std::string& value) {
     std::ostringstream out;
     out << '"';
     for (char c : value) {
@@ -657,7 +657,7 @@ static std::string litepp_json_string(const std::string& value) {
     return out.str();
 }
 
-static std::string litepp_hash_tokens(const llama_tokens& tokens) {
+static std::string icn_multi_hash_tokens(const llama_tokens& tokens) {
     std::ostringstream out;
     out << '[';
     for (size_t i = 0; i < tokens.size(); ++i) {
@@ -667,10 +667,10 @@ static std::string litepp_hash_tokens(const llama_tokens& tokens) {
         out << tokens[i];
     }
     out << ']';
-    return litepp_sha256_first16_hex(out.str());
+    return icn_multi_sha256_first16_hex(out.str());
 }
 
-static std::string litepp_url_quote(const std::string& value) {
+static std::string icn_multi_url_quote(const std::string& value) {
     std::ostringstream out;
     out << std::uppercase << std::hex << std::setfill('0');
     for (unsigned char c : value) {
@@ -687,7 +687,7 @@ static std::string litepp_url_quote(const std::string& value) {
     return out.str();
 }
 
-static std::string litepp_build_icn_name_v2(
+static std::string icn_multi_build_icn_name_v2(
         const llama_tokens& prefix_tokens,
         const llama_tokens& draft_tokens,
         int speculative_len) {
@@ -698,24 +698,24 @@ static std::string litepp_build_icn_name_v2(
     const std::string policy = "observe_only";
 
     return "/6g-ai/heterospec/v2/"
-            + litepp_url_quote(target_model)
+            + icn_multi_url_quote(target_model)
             + "/"
-            + litepp_url_quote(draft_model)
+            + icn_multi_url_quote(draft_model)
             + "/tok="
-            + litepp_sha256_first16_hex(litepp_json_string(tokenizer_id))
+            + icn_multi_sha256_first16_hex(icn_multi_json_string(tokenizer_id))
             + "/sampler="
-            + litepp_sha256_first16_hex(sampling_config)
+            + icn_multi_sha256_first16_hex(sampling_config)
             + "/policy="
-            + litepp_url_quote(policy)
+            + icn_multi_url_quote(policy)
             + "/prefix="
-            + litepp_hash_tokens(prefix_tokens)
+            + icn_multi_hash_tokens(prefix_tokens)
             + "/draft="
-            + litepp_hash_tokens(draft_tokens)
+            + icn_multi_hash_tokens(draft_tokens)
             + "/sl="
             + std::to_string(speculative_len);
 }
 
-static std::string litepp_join_floats(const std::vector<float>& values) {
+static std::string icn_multi_join_floats(const std::vector<float>& values) {
     std::ostringstream out;
     out << std::fixed << std::setprecision(3);
     for (size_t i = 0; i < values.size(); ++i) {
@@ -738,7 +738,7 @@ static double adaspec_expected_tokens(const std::vector<float>& confidences) {
     return total;
 }
 
-static double litepp_goodput(
+static double icn_multi_goodput(
         const std::vector<float>& confidences,
         double draft_per_token,
         double verify_wait_time,
@@ -767,13 +767,13 @@ static double litepp_goodput(
     return expected / total_time;
 }
 
-struct LiteDraftResult {
+struct AdaptiveDraftResult {
     llama_tokens tokens;
     std::vector<float> confidences;
     std::vector<float> calibrated_confidences;
 };
 
-static bool litepp_select_greedy_token(
+static bool icn_multi_select_greedy_token(
         llama_context * context,
         const llama_vocab * vocab,
         llama_token& token,
@@ -786,34 +786,34 @@ static bool litepp_select_greedy_token(
 
     int best_id = -1;
     float best_logit = -std::numeric_limits<float>::infinity();
+    float second_best_logit = -std::numeric_limits<float>::infinity();
     for (int i = 0; i < n_vocab; ++i) {
         const float value = logits[i];
-        if (std::isfinite(value) && value > best_logit) {
+        if (!std::isfinite(value)) {
+            continue;
+        }
+        if (value > best_logit) {
+            second_best_logit = best_logit;
             best_logit = value;
             best_id = i;
+        } else if (value > second_best_logit) {
+            second_best_logit = value;
         }
     }
     if (best_id < 0) {
         return false;
     }
 
-    double denom = 0.0;
-    for (int i = 0; i < n_vocab; ++i) {
-        const float value = logits[i];
-        if (std::isfinite(value)) {
-            denom += std::exp(static_cast<double>(value - best_logit));
-        }
-    }
-
     token = static_cast<llama_token>(best_id);
-    confidence = denom > 0.0
-            ? static_cast<float>(1.0 / denom)
-            : 0.0f;
+    const double margin = std::isfinite(second_best_logit)
+            ? static_cast<double>(best_logit - second_best_logit)
+            : 0.0;
+    confidence = static_cast<float>(1.0 / (1.0 + std::exp(-margin)));
     confidence = std::max(0.0f, std::min(1.0f, confidence));
     return true;
 }
 
-static LiteDraftResult generate_litepp_local_draft(
+static AdaptiveDraftResult generate_icn_multi_local_draft(
         CloudState& state,
         llama_context * context,
         const llama_vocab * vocab,
@@ -824,7 +824,7 @@ static LiteDraftResult generate_litepp_local_draft(
         double network_time,
         double network_time_per_token,
         double queue_time) {
-    LiteDraftResult result;
+    AdaptiveDraftResult result;
     const int n_draft_max = clamp_adaptive_n_draft(state, state.max_n_draft);
     result.tokens.reserve(n_draft_max);
     result.confidences.reserve(n_draft_max);
@@ -836,7 +836,7 @@ static LiteDraftResult generate_litepp_local_draft(
     common_batch_clear(batch);
     common_batch_add(batch, id_last, n_past, { 0 }, true);
     if (llama_decode(context, batch) != 0) {
-        LOGe("Lite++ draft decode failed while syncing last token");
+        LOGe("ICN-Multi-HeteroSpec draft decode failed while syncing last token");
         llama_batch_free(batch);
         return result;
     }
@@ -847,13 +847,13 @@ static LiteDraftResult generate_litepp_local_draft(
     for (int i = 0; i < n_draft_max; ++i) {
         llama_token id = 0;
         float confidence = 0.0f;
-        if (!litepp_select_greedy_token(context, vocab, id, confidence)) {
-            LOGe("Lite++ draft failed to select token at position=%d", i);
+        if (!icn_multi_select_greedy_token(context, vocab, id, confidence)) {
+            LOGe("ICN-Multi-HeteroSpec draft failed to select token at position=%d", i);
             break;
         }
 
         const float calibrated = static_cast<float>(
-                litepp_calibrate_confidence_value(state, confidence, i));
+                icn_multi_calibrate_confidence_value(state, confidence, i));
 
         result.tokens.push_back(id);
         result.confidences.push_back(confidence);
@@ -862,7 +862,7 @@ static LiteDraftResult generate_litepp_local_draft(
         const double candidate_network_time =
                 std::max(0.0, network_time)
                 + std::max(0.0, network_time_per_token) * result.tokens.size();
-        const double goodput = litepp_goodput(
+        const double goodput = icn_multi_goodput(
                 result.calibrated_confidences,
                 draft_per_token,
                 verify_wait_time,
@@ -890,7 +890,7 @@ static LiteDraftResult generate_litepp_local_draft(
         common_batch_clear(batch);
         common_batch_add(batch, id, n_past + i + 1, { 0 }, true);
         if (llama_decode(context, batch) != 0) {
-            LOGe("Lite++ draft decode failed after token position=%d", i);
+            LOGe("ICN-Multi-HeteroSpec draft decode failed after token position=%d", i);
             break;
         }
     }
@@ -940,22 +940,14 @@ static void update_adaptive_n_draft(
             state->rtt_ema_ready,
             std::max(0.001, std::min(0.250, network_time)),
             state->ema_alpha);
-    const double observed_uplink = payload_bytes > 0 && network_time > 0.001
-            ? payload_bytes / network_time
-            : state->default_uplink_bytes_per_second;
-    state->uplink_bytes_per_second_ema = update_ema_value(
-            state->uplink_bytes_per_second_ema,
-            state->uplink_bytes_per_second_ema_ready,
-            std::max(1.0, observed_uplink),
-            state->ema_alpha);
     state->queue_time_ema = update_ema_value(
             state->queue_time_ema,
             state->queue_time_ema_ready,
             std::max(0.0, queue_time),
             state->ema_alpha);
-    state->litepp_total_wasted_tokens += std::max(0, draft_count - bounded_accepted);
-    state->litepp_total_payload_bytes += std::max(0, payload_bytes);
-    litepp_update_calibrator(*state, confidence_scores, bounded_accepted);
+    state->icn_multi_total_wasted_tokens += std::max(0, draft_count - bounded_accepted);
+    state->icn_multi_total_payload_bytes += std::max(0, payload_bytes);
+    icn_multi_update_calibrator(*state, confidence_scores, bounded_accepted);
 
     state->adaptive_n_draft = clamp_adaptive_n_draft(*state, draft_count);
 
@@ -971,7 +963,7 @@ static void update_adaptive_n_draft(
     const double last_confidence = confidence_scores.empty() ? 0.0 : confidence_scores.back();
     const double last_calibrated = calibrated_confidence_scores.empty() ? last_confidence : calibrated_confidence_scores.back();
 
-    LOGi("litepp_k=%d litepp_goodput=%.3f litepp_estimated_tpot=%.3fs litepp_raw_conf=%.3f litepp_calibrated_p=%.3f litepp_expected_tokens=%.3f litepp_network_time=%.3fs litepp_queue_time=%.3fs litepp_payload_bytes=%d litepp_wasted_tokens=%lld accept_rate=%.3f draft_time=%.3fs verify_wait_time=%.3fs",
+    LOGi("icn_multi_k=%d icn_multi_goodput=%.3f icn_multi_estimated_tpot=%.3fs icn_multi_raw_conf=%.3f icn_multi_calibrated_p=%.3f icn_multi_expected_tokens=%.3f icn_multi_network_time=%.3fs icn_multi_queue_time=%.3fs icn_multi_payload_bytes=%d icn_multi_wasted_tokens=%lld accept_rate=%.3f draft_time=%.3fs verify_wait_time=%.3fs",
             state->adaptive_n_draft,
             goodput,
             estimated_tpot,
@@ -981,138 +973,10 @@ static void update_adaptive_n_draft(
             network_time,
             queue_time,
             payload_bytes,
-            static_cast<long long>(state->litepp_total_wasted_tokens),
+            static_cast<long long>(state->icn_multi_total_wasted_tokens),
             accept_rate,
             draft_time,
             verify_wait_time);
-}
-
-static void update_multi_adaptive_n_draft(
-        CloudState* state,
-        double draft_time,
-        int draft_count,
-        double verify_wait_time,
-        int accepted_draft_count) {
-    if (!state || draft_count <= 0) {
-        return;
-    }
-
-    const double draft_per_token = std::max(0.0, draft_time) / draft_count;
-    if (!std::isfinite(draft_per_token) || draft_per_token <= 0.0) {
-        return;
-    }
-
-    const double wait_time = std::max(0.0, verify_wait_time);
-    const int bounded_accepted = std::max(0, std::min(accepted_draft_count, draft_count));
-    const double accept_rate = static_cast<double>(bounded_accepted) / draft_count;
-
-    state->draft_token_time_ema = update_ema_value(
-            state->draft_token_time_ema,
-            state->draft_token_time_ema_ready,
-            draft_per_token,
-            state->ema_alpha);
-    state->verify_wait_time_ema = update_ema_value(
-            state->verify_wait_time_ema,
-            state->verify_wait_time_ema_ready,
-            wait_time,
-            state->ema_alpha);
-    state->accept_rate_ema =
-            state->ema_alpha * accept_rate + (1.0 - state->ema_alpha) * state->accept_rate_ema;
-
-    int time_fit_k = state->max_n_draft;
-    if (state->draft_token_time_ema > 0.0) {
-        time_fit_k = static_cast<int>(std::round(
-                state->verify_wait_time_ema / state->draft_token_time_ema));
-    }
-
-    int next_k = state->adaptive_n_draft;
-    if (state->accept_rate_ema < 0.40) {
-        next_k = state->adaptive_n_draft - 1;
-    } else if (state->accept_rate_ema > 0.70) {
-        next_k = time_fit_k;
-    } else {
-        next_k = std::min(state->adaptive_n_draft, time_fit_k);
-    }
-
-    state->adaptive_n_draft = clamp_adaptive_n_draft(*state, next_k);
-    LOGi("multi_adaptive_n_draft=%d accept_rate=%.3f draft_time=%.3fs verify_wait_time=%.3fs",
-            state->adaptive_n_draft,
-            accept_rate,
-            draft_time,
-            verify_wait_time);
-}
-
-static bool multi_select_greedy_token(
-        llama_context * context,
-        const llama_vocab * vocab,
-        llama_token& token) {
-    const float * logits = llama_get_logits_ith(context, -1);
-    const int n_vocab = llama_vocab_n_tokens(vocab);
-    if (!logits || n_vocab <= 0) {
-        return false;
-    }
-
-    int best_id = -1;
-    float best_logit = -std::numeric_limits<float>::infinity();
-    for (int i = 0; i < n_vocab; ++i) {
-        const float value = logits[i];
-        if (std::isfinite(value) && value > best_logit) {
-            best_logit = value;
-            best_id = i;
-        }
-    }
-
-    if (best_id < 0) {
-        return false;
-    }
-
-    token = static_cast<llama_token>(best_id);
-    return true;
-}
-
-static llama_tokens generate_multi_local_draft(
-        CloudState& state,
-        llama_context * context,
-        const llama_vocab * vocab,
-        const llama_tokens& prompt_tgt,
-        llama_token id_last) {
-    llama_tokens tokens;
-    const int n_draft = clamp_adaptive_n_draft(state, state.adaptive_n_draft);
-    tokens.reserve(n_draft);
-
-    llama_batch batch = llama_batch_init(1, 0, 1);
-    const llama_pos n_past = static_cast<llama_pos>(prompt_tgt.size());
-
-    common_batch_clear(batch);
-    common_batch_add(batch, id_last, n_past, { 0 }, true);
-    if (llama_decode(context, batch) != 0) {
-        LOGe("Multi draft decode failed while syncing last token");
-        llama_batch_free(batch);
-        return tokens;
-    }
-
-    for (int i = 0; i < n_draft; ++i) {
-        llama_token id = 0;
-        if (!multi_select_greedy_token(context, vocab, id)) {
-            LOGe("Multi draft failed to select token at position=%d", i);
-            break;
-        }
-
-        tokens.push_back(id);
-        if (llama_vocab_is_eog(vocab, id)) {
-            break;
-        }
-
-        common_batch_clear(batch);
-        common_batch_add(batch, id, n_past + i + 1, { 0 }, true);
-        if (llama_decode(context, batch) != 0) {
-            LOGe("Multi draft decode failed after token position=%d", i);
-            break;
-        }
-    }
-
-    llama_batch_free(batch);
-    return tokens;
 }
 
 bool init_websocket(CloudState& state, const std::string& url) {
@@ -1141,29 +1005,92 @@ bool init_websocket(CloudState& state, const std::string& url) {
         try {
             const auto* data = reinterpret_cast<const uint8_t*>(msg->get_payload().data());
             const size_t size = msg->get_payload().size();
-            if (size == 0 || data[0] != 0x01) {
+            if (size == 0) {
                 return;
             }
 
-            const size_t payload_size = size - 1;
-            if (payload_size % sizeof(int32_t) != 0) {
-                LOGe("Malformed v2 verify response size=%zu", size);
+            if (data[0] == heterospec_v3::MSG_PREFILL_ACK) {
+                uint32_t request_id = 0;
+                if (!parse_v3_prefill_ack(data, size, request_id)) {
+                    LOGe("Malformed v3 prefill ack");
+                    return;
+                }
+                std::unique_lock<std::mutex> lock(state.mutex);
+                if (request_id != state.pending_request_id) {
+                    LOGe("Ignoring stale prefill ack request_id=%u pending=%u",
+                            request_id,
+                            state.pending_request_id);
+                    return;
+                }
+                state.response_request_id = request_id;
+                state.has_prefill_ack = true;
+                state.pending_request_id = 0;
+                state.cv.notify_one();
                 return;
             }
 
-            std::vector<int> tokens;
-            const size_t num_tokens = payload_size / sizeof(int32_t);
-            tokens.reserve(num_tokens);
-            for (size_t i = 0; i < num_tokens; ++i) {
-                int32_t token = 0;
-                std::memcpy(&token, data + 1 + i * sizeof(int32_t), sizeof(int32_t));
-                tokens.push_back(static_cast<int>(token));
+            if (data[0] == heterospec_v3::MSG_VERIFY_ACK) {
+                std::vector<int> tokens;
+                uint32_t request_id = 0;
+                int accepted_draft_count = 0;
+                uint32_t verify_us = 0;
+                uint32_t queue_us = 0;
+                uint32_t flags = 0;
+                if (!parse_v3_verify_ack(
+                            data,
+                            size,
+                            request_id,
+                            accepted_draft_count,
+                            verify_us,
+                            queue_us,
+                            flags,
+                            tokens)) {
+                    LOGe("Malformed v3 verify ack");
+                    return;
+                }
+
+                std::unique_lock<std::mutex> lock(state.mutex);
+                if (request_id != state.pending_request_id) {
+                    LOGe("Ignoring stale verify ack request_id=%u pending=%u",
+                            request_id,
+                            state.pending_request_id);
+                    return;
+                }
+                state.accepted_tokens = std::move(tokens);
+                state.response_request_id = request_id;
+                state.response_accepted_draft_count = accepted_draft_count;
+                state.response_verify_us = verify_us;
+                state.response_queue_us = queue_us;
+                state.response_flags = flags;
+                state.has_verify_response = true;
+                state.pending_request_id = 0;
+                state.cv.notify_one();
+                return;
             }
 
-            std::unique_lock<std::mutex> lock(state.mutex);
-            state.accepted_tokens = std::move(tokens);
-            state.has_verify_response = true;
-            state.cv.notify_one();
+            if (data[0] == heterospec_v3::MSG_ERROR) {
+                uint32_t request_id = 0;
+                uint32_t code = 0;
+                std::string message;
+                if (!parse_v3_error(data, size, request_id, code, message)) {
+                    LOGe("Malformed v3 error message");
+                    return;
+                }
+
+                std::unique_lock<std::mutex> lock(state.mutex);
+                if (state.pending_request_id != 0 && request_id != state.pending_request_id) {
+                    LOGe("Ignoring stale error request_id=%u pending=%u",
+                            request_id,
+                            state.pending_request_id);
+                    return;
+                }
+                state.error_request_id = request_id;
+                state.error_code = code;
+                state.error_message = std::move(message);
+                state.has_error = true;
+                state.pending_request_id = 0;
+                state.cv.notify_one();
+            }
         } catch (const std::exception& e) {
             LOGe("Error parsing message: %s", e.what());
         }
@@ -1245,6 +1172,18 @@ bool init_websocket(CloudState& state, const std::string& url) {
 
 static void shutdown_cloud_state(CloudState& state) {
     if (state.is_connected) {
+        try {
+            const uint32_t request_id = cloud_next_request_id(state);
+            const auto close_msg = pack_close_request_v3(request_id);
+            state.client.send(
+                    state.connection,
+                    close_msg.data(),
+                    close_msg.size(),
+                    websocketpp::frame::opcode::binary);
+        } catch (const std::exception& e) {
+            LOGe("Exception while sending close message: %s", e.what());
+        }
+
         try {
             websocketpp::lib::error_code ec;
             state.client.close(
@@ -1336,17 +1275,15 @@ Java_android_llama_cpp_LLamaAndroid_heterospec_1init(
             return -2;
         }
 
-        std::vector<uint8_t> binary_msg;
-        binary_msg.reserve(1 + tokens_list.size() * sizeof(int32_t));
-        binary_msg.push_back(0x00);
-        for (llama_token token : tokens_list) {
-            const int32_t value = static_cast<int32_t>(token);
-            const auto* raw = reinterpret_cast<const uint8_t*>(&value);
-            binary_msg.insert(binary_msg.end(), raw, raw + sizeof(int32_t));
-        }
+        const uint32_t request_id = cloud_next_request_id(*state);
+        const auto binary_msg = pack_token_request_v3(
+                heterospec_v3::MSG_PREFILL_REQUEST,
+                request_id,
+                tokens_list);
+        cloud_prepare_pending(*state, request_id);
 
         state->client.send(state->connection, binary_msg.data(), binary_msg.size(), websocketpp::frame::opcode::binary);
-        LOGi("Prefill v2 message sent successfully tokens=%zu", tokens_list.size());
+        LOGi("Prefill v3 message sent successfully request_id=%u", request_id);
     } catch (const std::exception& e) {
         LOGe("Exception while sending message: %s", e.what());
         shutdown_cloud_state(*state);
@@ -1368,6 +1305,24 @@ Java_android_llama_cpp_LLamaAndroid_heterospec_1init(
 
     if (llama_decode(context, *batch) != 0) {
         LOGe("llama_decode() failed");
+    }
+
+    {
+        std::unique_lock<std::mutex> lock(state->mutex);
+        const bool ready = state->cv.wait_for(lock, std::chrono::seconds(30), [state] {
+            return state->has_prefill_ack || state->has_error;
+        });
+        if (!ready || state->has_error) {
+            LOGe("Prefill v3 failed ready=%d error_code=%u error=%s",
+                    ready ? 1 : 0,
+                    state->error_code,
+                    state->error_message.c_str());
+            lock.unlock();
+            shutdown_cloud_state(*state);
+            env->ReleaseStringUTFChars(server_url, url);
+            env->ReleaseStringUTFChars(jtext, text);
+            return -2;
+        }
     }
 
     // 将状态指针保存到Java对象中
@@ -1412,37 +1367,60 @@ Java_android_llama_cpp_LLamaAndroid_heterospec_1loop(
 
     // 生成草稿token
     auto start1 = std::chrono::high_resolution_clock::now();
-    llama_tokens draft_tokens = generate_multi_local_draft(
+    const double estimated_draft_per_token = state->draft_token_time_ema_ready
+            ? state->draft_token_time_ema
+            : state->default_draft_per_token;
+    const double estimated_verify_wait_time = state->verify_wait_time_ema_ready
+            ? state->verify_wait_time_ema
+            : state->default_verify_wait_time;
+    const double estimated_rtt = state->rtt_ema_ready
+            ? state->rtt_ema
+            : state->default_rtt;
+    const double estimated_uplink = state->uplink_bytes_per_second_ema_ready
+            ? state->uplink_bytes_per_second_ema
+            : state->default_uplink_bytes_per_second;
+    const double estimated_network_time = estimated_rtt;
+    const double estimated_network_time_per_token = 4.0 / std::max(1.0, estimated_uplink);
+    const double estimated_queue_time = state->queue_time_ema_ready
+            ? state->queue_time_ema
+            : 0.0;
+    AdaptiveDraftResult draft_result = generate_icn_multi_local_draft(
             *state,
             context,
             vocab,
             prompt_tgt,
-            id_last);
+            id_last,
+            estimated_draft_per_token,
+            estimated_verify_wait_time,
+            estimated_network_time,
+            estimated_network_time_per_token,
+            estimated_queue_time);
+    llama_tokens draft_tokens = std::move(draft_result.tokens);
+    std::vector<float> draft_confidences = std::move(draft_result.confidences);
+    std::vector<float> calibrated_confidences = std::move(draft_result.calibrated_confidences);
     state->adaptive_n_draft = clamp_adaptive_n_draft(*state, static_cast<int>(draft_tokens.size()));
     if (draft_tokens.empty()) {
-        LOGe("Multi draft produced no tokens");
+        LOGe("ICN-Multi-HeteroSpec draft produced no tokens");
         return env->NewStringUTF("");
     }
-    LOGi("multi_draft_tokens=%zu adaptive_n_draft=%d", draft_tokens.size(), state->adaptive_n_draft);
+    const std::string icn_multi_icn_name = icn_multi_build_icn_name_v2(prompt_tgt, draft_tokens, static_cast<int>(draft_tokens.size()));
+    LOGi("icn_multi_icn_name=%s", icn_multi_icn_name.c_str());
+    LOGi("icn_multi_raw_conf=%s icn_multi_calibrated_p=%s",
+            icn_multi_join_floats(draft_confidences).c_str(),
+            icn_multi_join_floats(calibrated_confidences).c_str());
     try {
-        std::vector<uint8_t> binary_msg;
-        binary_msg.reserve(1 + draft_tokens.size() * sizeof(int32_t));
-        binary_msg.push_back(0x01);
-        for (llama_token token : draft_tokens) {
-            const int32_t value = static_cast<int32_t>(token);
-            const auto* raw = reinterpret_cast<const uint8_t*>(&value);
-            binary_msg.insert(binary_msg.end(), raw, raw + sizeof(int32_t));
-        }
+        const uint32_t request_id = cloud_next_request_id(*state);
+        const auto binary_msg = pack_token_request_v3(
+                heterospec_v3::MSG_VERIFY_REQUEST,
+                request_id,
+                draft_tokens);
+        const int payload_bytes = static_cast<int>(binary_msg.size());
 
         auto end1 = std::chrono::high_resolution_clock::now();
         double draft_time = std::chrono::duration<double>(end1 - start1).count();
         state->draft_times.push_back(draft_time);
 
-        {
-            std::lock_guard<std::mutex> guard(state->mutex);
-            state->accepted_tokens.clear();
-            state->has_verify_response = false;
-        }
+        cloud_prepare_pending(*state, request_id);
         auto start = std::chrono::high_resolution_clock::now();
 
         state->client.send(state->connection,
@@ -1454,45 +1432,72 @@ Java_android_llama_cpp_LLamaAndroid_heterospec_1loop(
         const int draft_count = static_cast<int>(draft_tokens.size());
         int accepted_draft_count = 0;
         double verify_time = 0.0;
+        double cloud_verify_time = 0.0;
+        double queue_time = 0.0;
 
         std::unique_lock<std::mutex> lock(state->mutex);
-        const bool ready = state->cv.wait_for(lock, std::chrono::milliseconds(1000), [state] {
-            return state->has_verify_response || !state->is_connected;
+        const bool ready = state->cv.wait_for(lock, std::chrono::seconds(10), [state] {
+            return state->has_verify_response || state->has_error || !state->is_connected;
         });
         if (!ready) {
-            LOGe("Verify v2 timeout");
+            LOGe("Verify v3 timeout request_id=%u", request_id);
+            state->pending_request_id = 0;
             state->is_connected = false;
             lock.unlock();
             state->client.stop_perpetual();
             state->client.stop();
             return env->NewStringUTF("");
         }
+        if (state->has_error) {
+            LOGe("Verify v3 error request_id=%u code=%u message=%s",
+                    state->error_request_id,
+                    state->error_code,
+                    state->error_message.c_str());
+            return env->NewStringUTF("");
+        }
         if (state->has_verify_response) {
             auto end = std::chrono::high_resolution_clock::now();
             verify_time = std::chrono::duration<double>(end - start).count();
             final_tokens = std::move(state->accepted_tokens);
-            accepted_draft_count = final_tokens.empty()
-                    ? 0
-                    : std::min(static_cast<int>(final_tokens.size() - 1), draft_count);
+            accepted_draft_count = std::max(0, std::min(state->response_accepted_draft_count, draft_count));
+            cloud_verify_time = state->response_verify_us > 0
+                    ? static_cast<double>(state->response_verify_us) / 1000000.0
+                    : std::max(0.0, verify_time - estimated_network_time);
+            queue_time = static_cast<double>(state->response_queue_us) / 1000000.0;
             state->accepted_tokens.clear();
             state->has_verify_response = false;
-            LOGi("Verification v2 roundtrip=%.3fs accepted_draft_count=%d",
+            state->response_accepted_draft_count = 0;
+            state->response_verify_us = 0;
+            state->response_queue_us = 0;
+            LOGi("Verification roundtrip=%.3fs cloud_verify=%.3fs queue=%.3fs request_id=%u",
                     verify_time,
-                    accepted_draft_count);
+                    cloud_verify_time,
+                    queue_time,
+                    request_id);
+        } else {
+            state->pending_request_id = 0;
         }
         lock.unlock();
 
         if (final_tokens.empty()) {
-            LOGe("Verify v2 returned no tokens");
+            LOGe("Verify v3 returned no tokens request_id=%u", request_id);
             return env->NewStringUTF("");
         }
 
-            update_multi_adaptive_n_draft(
+        const double observed_network_time = std::max(
+                0.001,
+                verify_time - cloud_verify_time - queue_time);
+            update_adaptive_n_draft(
                     state,
                     draft_time,
                     draft_count,
-                    verify_time,
-                    accepted_draft_count);
+                    cloud_verify_time,
+                    accepted_draft_count,
+                    draft_confidences,
+                    calibrated_confidences,
+                    observed_network_time,
+                    queue_time,
+                    payload_bytes);
             state->prompt_tokens.insert(state->prompt_tokens.end(), state->last_token);
             state->last_token = final_tokens.back();
             state->prompt_tokens.insert(state->prompt_tokens.end(), final_tokens.begin(), final_tokens.end() - 1);
