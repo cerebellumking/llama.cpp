@@ -16,6 +16,7 @@
 #include <openssl/sha.h>
 #include "llama.h"
 #include "common.h"
+#include "ggml-backend.h"
 #include "websocketpp/client.hpp"
 #include "websocketpp/config/asio_client.hpp"
 #include <thread>
@@ -45,6 +46,51 @@
 jclass la_int_var;
 jmethodID la_int_var_value;
 jmethodID la_int_var_inc;
+
+static bool ensure_int_var_jni(JNIEnv *env, jobject intvar) {
+    if (la_int_var_value != nullptr && la_int_var_inc != nullptr) {
+        return true;
+    }
+    if (intvar == nullptr) {
+        LOGe("IntVar jobject is null");
+        return false;
+    }
+    jclass local = env->GetObjectClass(intvar);
+    if (local == nullptr) {
+        if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+        }
+        LOGe("IntVar GetObjectClass failed");
+        return false;
+    }
+    if (la_int_var == nullptr) {
+        la_int_var = reinterpret_cast<jclass>(env->NewGlobalRef(local));
+    }
+    if (la_int_var_value == nullptr) {
+        la_int_var_value = env->GetMethodID(local, "getValue", "()I");
+        if (la_int_var_value == nullptr) {
+            if (env->ExceptionCheck()) {
+                env->ExceptionClear();
+            }
+            LOGe("IntVar.getValue() JNI lookup failed");
+            env->DeleteLocalRef(local);
+            return false;
+        }
+    }
+    if (la_int_var_inc == nullptr) {
+        la_int_var_inc = env->GetMethodID(local, "inc", "()V");
+        if (la_int_var_inc == nullptr) {
+            if (env->ExceptionCheck()) {
+                env->ExceptionClear();
+            }
+            LOGe("IntVar.inc() JNI lookup failed; R8 likely stripped the method");
+            env->DeleteLocalRef(local);
+            return false;
+        }
+    }
+    env->DeleteLocalRef(local);
+    return true;
+}
 
 std::string cached_token_chars;
 
@@ -229,8 +275,22 @@ Java_android_llama_cpp_LLamaAndroid_free_1sampler(JNIEnv *, jobject, jlong sampl
 
 extern "C"
 JNIEXPORT void JNICALL
-Java_android_llama_cpp_LLamaAndroid_backend_1init(JNIEnv *, jobject) {
+Java_android_llama_cpp_LLamaAndroid_backend_1init(JNIEnv *env, jobject, jstring native_lib_dir) {
+    if (native_lib_dir != nullptr) {
+        const char *path_to_backend = env->GetStringUTFChars(native_lib_dir, 0);
+        if (path_to_backend && path_to_backend[0] != '\0') {
+            LOGi("Loading backends from %s", path_to_backend);
+            ggml_backend_load_all_from_path(path_to_backend);
+        } else {
+            LOGi("nativeLibraryDir empty; calling ggml_backend_load_all()");
+            ggml_backend_load_all();
+        }
+        env->ReleaseStringUTFChars(native_lib_dir, path_to_backend);
+    } else {
+        ggml_backend_load_all();
+    }
     llama_backend_init();
+    LOGi("Backend initiated; registry count=%zu", ggml_backend_reg_count());
 }
 
 extern "C"
@@ -309,9 +369,9 @@ Java_android_llama_cpp_LLamaAndroid_completion_1loop(
     const auto model = llama_get_model(context);
     const auto vocab = llama_model_get_vocab(model);
 
-    if (!la_int_var) la_int_var = env->GetObjectClass(intvar_ncur);
-    if (!la_int_var_value) la_int_var_value = env->GetMethodID(la_int_var, "getValue", "()I");
-    if (!la_int_var_inc) la_int_var_inc = env->GetMethodID(la_int_var, "inc", "()V");
+    if (!ensure_int_var_jni(env, intvar_ncur)) {
+        return nullptr;
+    }
 
     // sample the most likely token
     const auto new_token_id = llama_sampler_sample(sampler, context, -1);
@@ -418,6 +478,22 @@ static std::vector<uint8_t> pack_close_request_v3(uint32_t request_id) {
     return out;
 }
 
+enum class DraftStrategy {
+    Fixed3,
+    Adaptive,
+};
+
+static DraftStrategy parse_draft_strategy(const char * value) {
+    if (value != nullptr && std::strcmp(value, "adaptive") == 0) {
+        return DraftStrategy::Adaptive;
+    }
+    return DraftStrategy::Fixed3;
+}
+
+static const char * draft_strategy_name(DraftStrategy strategy) {
+    return strategy == DraftStrategy::Adaptive ? "adaptive" : "fixed3";
+}
+
 struct CloudState {
     ws_client client;
     websocketpp::connection_hdl connection;
@@ -449,9 +525,13 @@ struct CloudState {
     // 添加draft time存储数组
     std::vector<double> draft_times;
 
+    DraftStrategy draft_strategy = DraftStrategy::Fixed3;
+    bool use_queue_in_goodput = false;
+    bool exclude_next_round_as_ttft = true;
     int adaptive_n_draft = 3;
     int min_n_draft = 1;
     int max_n_draft = 6;
+    static constexpr int kFixedNDraft = 3;
     double draft_token_time_ema = 0.0;
     double verify_wait_time_ema = 0.0;
     double accept_rate_ema = 0.5;
@@ -738,6 +818,8 @@ static double adaspec_expected_tokens(const std::vector<float>& confidences) {
     return total;
 }
 
+// queue_time must be 0 unless CloudState.use_queue_in_goodput is on.
+// Current queue_us is bonus-precompute wait on this connection, not shared GPU queue.
 static double icn_multi_goodput(
         const std::vector<float>& confidences,
         double draft_per_token,
@@ -825,7 +907,13 @@ static AdaptiveDraftResult generate_icn_multi_local_draft(
         double network_time_per_token,
         double queue_time) {
     AdaptiveDraftResult result;
-    const int n_draft_max = clamp_adaptive_n_draft(state, state.max_n_draft);
+    const bool adaptive = state.draft_strategy == DraftStrategy::Adaptive;
+    const int n_draft_max = clamp_adaptive_n_draft(
+            state,
+            adaptive ? state.max_n_draft : CloudState::kFixedNDraft);
+    const double queue_time_for_goodput = state.use_queue_in_goodput
+            ? std::max(0.0, queue_time)
+            : 0.0;
     result.tokens.reserve(n_draft_max);
     result.confidences.reserve(n_draft_max);
     result.calibrated_confidences.reserve(n_draft_max);
@@ -859,28 +947,30 @@ static AdaptiveDraftResult generate_icn_multi_local_draft(
         result.confidences.push_back(confidence);
         result.calibrated_confidences.push_back(calibrated);
 
-        const double candidate_network_time =
-                std::max(0.0, network_time)
-                + std::max(0.0, network_time_per_token) * result.tokens.size();
-        const double goodput = icn_multi_goodput(
-                result.calibrated_confidences,
-                draft_per_token,
-                verify_wait_time,
-                candidate_network_time,
-                queue_time,
-                state.slo_tpot);
+        if (adaptive) {
+            const double candidate_network_time =
+                    std::max(0.0, network_time)
+                    + std::max(0.0, network_time_per_token) * result.tokens.size();
+            const double goodput = icn_multi_goodput(
+                    result.calibrated_confidences,
+                    draft_per_token,
+                    verify_wait_time,
+                    candidate_network_time,
+                    queue_time_for_goodput,
+                    state.slo_tpot);
 
-        if (goodput > best_goodput) {
-            best_goodput = goodput;
-            found_feasible = goodput >= 0.0;
-            if (!found_feasible) {
+            if (goodput > best_goodput) {
+                best_goodput = goodput;
+                found_feasible = goodput >= 0.0;
+                if (!found_feasible) {
+                    break;
+                }
+            } else if (found_feasible) {
+                result.tokens.pop_back();
+                result.confidences.pop_back();
+                result.calibrated_confidences.pop_back();
                 break;
             }
-        } else if (found_feasible) {
-            result.tokens.pop_back();
-            result.confidences.pop_back();
-            result.calibrated_confidences.pop_back();
-            break;
         }
 
         if (n_draft_max <= static_cast<int>(result.tokens.size())) {
@@ -940,10 +1030,12 @@ static void update_adaptive_n_draft(
             state->rtt_ema_ready,
             std::max(0.001, std::min(0.250, network_time)),
             state->ema_alpha);
+    const double observed_queue_time = std::max(0.0, queue_time);
+    const double queue_time_for_goodput = state->use_queue_in_goodput ? observed_queue_time : 0.0;
     state->queue_time_ema = update_ema_value(
             state->queue_time_ema,
             state->queue_time_ema_ready,
-            std::max(0.0, queue_time),
+            observed_queue_time,
             state->ema_alpha);
     state->icn_multi_total_wasted_tokens += std::max(0, draft_count - bounded_accepted);
     state->icn_multi_total_payload_bytes += std::max(0, payload_bytes);
@@ -957,7 +1049,7 @@ static void update_adaptive_n_draft(
     const double total_time = std::max(0.0, draft_time)
             + wait_time
             + std::max(0.0, network_time)
-            + std::max(0.0, queue_time);
+            + queue_time_for_goodput;
     const double estimated_tpot = expected_tokens > 0.0 ? total_time / expected_tokens : total_time;
     const double goodput = total_time > 0.0 ? expected_tokens / total_time : 0.0;
     const double last_confidence = confidence_scores.empty() ? 0.0 : confidence_scores.back();
@@ -971,7 +1063,7 @@ static void update_adaptive_n_draft(
             last_calibrated,
             expected_tokens,
             network_time,
-            queue_time,
+            observed_queue_time,
             payload_bytes,
             static_cast<long long>(state->icn_multi_total_wasted_tokens),
             accept_rate,
@@ -1232,7 +1324,9 @@ Java_android_llama_cpp_LLamaAndroid_heterospec_1init(
         jstring jtext,
         jboolean format_chat,
         jint n_len,
-        jstring server_url)
+        jstring server_url,
+        jstring draft_strategy,
+        jboolean use_queue_in_goodput)
 {
     cached_token_chars.clear();
     const auto text = env->GetStringUTFChars(jtext, 0);
@@ -1248,9 +1342,21 @@ Java_android_llama_cpp_LLamaAndroid_heterospec_1init(
     }
 
     const char *url = env->GetStringUTFChars(server_url, nullptr);
+    const char *strategy_cstr = draft_strategy != nullptr
+            ? env->GetStringUTFChars(draft_strategy, nullptr)
+            : nullptr;
     auto state_owner = std::make_unique<CloudState>();
     auto* state = state_owner.get();
-    state->server_url = url;
+    state->server_url = url ? url : "";
+    state->draft_strategy = parse_draft_strategy(strategy_cstr);
+    state->use_queue_in_goodput = (use_queue_in_goodput == JNI_TRUE);
+    LOGi("hetero_config draft_strategy=%s use_queue_in_goodput=%d",
+            draft_strategy_name(state->draft_strategy),
+            state->use_queue_in_goodput ? 1 : 0);
+    if (strategy_cstr != nullptr) {
+        env->ReleaseStringUTFChars(draft_strategy, strategy_cstr);
+        strategy_cstr = nullptr;
+    }
 
     // 初始化WebSocket连接
     if (!init_websocket(*state, url)) {
@@ -1348,9 +1454,9 @@ Java_android_llama_cpp_LLamaAndroid_heterospec_1loop(
     jfieldID fid = env->GetFieldID(cls, "nativeStatePtr", "J");
     auto* state = reinterpret_cast<CloudState*>(env->GetLongField(thiz, fid));
 
-    if (!la_int_var) la_int_var = env->GetObjectClass(intvar_ncur);
-    if (!la_int_var_value) la_int_var_value = env->GetMethodID(la_int_var, "getValue", "()I");
-    if (!la_int_var_inc) la_int_var_inc = env->GetMethodID(la_int_var, "inc", "()V");
+    if (!ensure_int_var_jni(env, intvar_ncur)) {
+        return env->NewStringUTF("");
+    }
 
     if (!state || !state->is_connected) {
         return env->NewStringUTF("");
@@ -1381,7 +1487,7 @@ Java_android_llama_cpp_LLamaAndroid_heterospec_1loop(
             : state->default_uplink_bytes_per_second;
     const double estimated_network_time = estimated_rtt;
     const double estimated_network_time_per_token = 4.0 / std::max(1.0, estimated_uplink);
-    const double estimated_queue_time = state->queue_time_ema_ready
+    const double estimated_queue_time = (state->use_queue_in_goodput && state->queue_time_ema_ready)
             ? state->queue_time_ema
             : 0.0;
     AdaptiveDraftResult draft_result = generate_icn_multi_local_draft(
@@ -1434,6 +1540,8 @@ Java_android_llama_cpp_LLamaAndroid_heterospec_1loop(
         double verify_time = 0.0;
         double cloud_verify_time = 0.0;
         double queue_time = 0.0;
+        uint32_t logged_verify_us = 0;
+        uint32_t logged_queue_us = 0;
 
         std::unique_lock<std::mutex> lock(state->mutex);
         const bool ready = state->cv.wait_for(lock, std::chrono::seconds(10), [state] {
@@ -1460,6 +1568,8 @@ Java_android_llama_cpp_LLamaAndroid_heterospec_1loop(
             verify_time = std::chrono::duration<double>(end - start).count();
             final_tokens = std::move(state->accepted_tokens);
             accepted_draft_count = std::max(0, std::min(state->response_accepted_draft_count, draft_count));
+            logged_verify_us = state->response_verify_us;
+            logged_queue_us = state->response_queue_us;
             cloud_verify_time = state->response_verify_us > 0
                     ? static_cast<double>(state->response_verify_us) / 1000000.0
                     : std::max(0.0, verify_time - estimated_network_time);
@@ -1487,6 +1597,26 @@ Java_android_llama_cpp_LLamaAndroid_heterospec_1loop(
         const double observed_network_time = std::max(
                 0.001,
                 verify_time - cloud_verify_time - queue_time);
+        const int n_out = static_cast<int>(final_tokens.size());
+        const double round_s = draft_time + verify_time;
+        double tpot_excl_ttft = 0.0;
+        if (state->exclude_next_round_as_ttft) {
+            state->exclude_next_round_as_ttft = false;
+        } else if (n_out > 0) {
+            tpot_excl_ttft = round_s / static_cast<double>(n_out);
+        }
+        if (logged_verify_us == 0 && cloud_verify_time > 0.0) {
+            logged_verify_us = static_cast<uint32_t>(cloud_verify_time * 1000000.0 + 0.5);
+        }
+        LOGi("hetero_round strategy=%s k=%d accepted=%d draft_ms=%.3f verify_us=%u queue_us=%u rtt_ms=%.3f tpot_excl_ttft=%.6f",
+                draft_strategy_name(state->draft_strategy),
+                draft_count,
+                accepted_draft_count,
+                draft_time * 1000.0,
+                logged_verify_us,
+                logged_queue_us,
+                observed_network_time * 1000.0,
+                tpot_excl_ttft);
             update_adaptive_n_draft(
                     state,
                     draft_time,

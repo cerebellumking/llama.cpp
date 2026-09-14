@@ -1,6 +1,7 @@
 package android.llama.cpp
 
 import android.util.Log
+import androidx.annotation.Keep
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.flow.Flow
@@ -24,7 +25,7 @@ class LLamaAndroid {
 
             // Set llama log handler to Android
             log_to_android()
-            backend_init(false)
+            backend_init(nativeLibraryDir)
 
             Log.d(tag, system_info())
 
@@ -40,13 +41,20 @@ class LLamaAndroid {
     private var nativeStatePtr: Long = 0L
     @Volatile
     private var heteroServerUrl: String = DEFAULT_HETERO_SERVER_URL
+    @Volatile
+    private var draftStrategy: String = DRAFT_STRATEGY_FIXED3
+    @Volatile
+    private var useQueueInGoodput: Boolean = false
+
+    @Volatile
+    private var nativeLibraryDir: String = ""
 
     private external fun log_to_android()
     private external fun load_model(filename: String): Long
     private external fun free_model(model: Long)
     private external fun new_context(model: Long): Long
     private external fun free_context(context: Long)
-    private external fun backend_init(numa: Boolean)
+    private external fun backend_init(nativeLibDir: String)
     private external fun backend_free()
     private external fun new_batch(nTokens: Int, embd: Int, nSeqMax: Int): Long
     private external fun free_batch(batch: Long)
@@ -78,6 +86,8 @@ class LLamaAndroid {
         formatChat: Boolean,
         nLen: Int,
         serverUrl: String,
+        draftStrategy: String,
+        useQueueInGoodput: Boolean,
     ): Int
 
     private external fun heterospec_cleanup()
@@ -114,18 +124,49 @@ class LLamaAndroid {
         }
     }
 
+    fun setNativeLibraryDir(dir: String) {
+        nativeLibraryDir = dir.trim()
+    }
+
     fun setHeteroServerUrl(url: String) {
         heteroServerUrl = url.trim().ifEmpty { DEFAULT_HETERO_SERVER_URL }
     }
+
+    fun setDraftStrategy(strategy: String) {
+        draftStrategy = normalizeDraftStrategy(strategy)
+    }
+
+    fun getDraftStrategy(): String = draftStrategy
+
+    fun setUseQueueInGoodput(enabled: Boolean) {
+        useQueueInGoodput = enabled
+    }
+
+    fun getUseQueueInGoodput(): Boolean = useQueueInGoodput
 
     fun sendHetero(
         message: String,
         formatChat: Boolean = false,
         serverUrl: String = heteroServerUrl,
+        draftStrategy: String = this.draftStrategy,
+        useQueueInGoodput: Boolean = this.useQueueInGoodput,
     ): Flow<Pair<String, Int>> = flow {
         when (val state = threadLocalState.get()) {
             is State.Loaded -> {
-                val ncur = IntVar(heterospec_init(state.context, state.batch, message, formatChat, nlen, serverUrl.trim().ifEmpty { DEFAULT_HETERO_SERVER_URL }))
+                val strategy = normalizeDraftStrategy(draftStrategy)
+                Log.i(tag, "sendHetero draft_strategy=$strategy use_queue_in_goodput=$useQueueInGoodput")
+                val ncur = IntVar(
+                    heterospec_init(
+                        state.context,
+                        state.batch,
+                        message,
+                        formatChat,
+                        nlen,
+                        serverUrl.trim().ifEmpty { DEFAULT_HETERO_SERVER_URL },
+                        strategy,
+                        useQueueInGoodput,
+                    )
+                )
                 var promptLen = ncur.value
                 if(ncur.value < 0) {
                     Log.e(tag, "Heterospec init failed")
@@ -206,18 +247,39 @@ class LLamaAndroid {
 
     companion object {
         const val DEFAULT_HETERO_SERVER_URL = "ws://122.51.47.91:22776/ws/predict/binary/v3"
+        const val DRAFT_STRATEGY_FIXED3 = "fixed3"
+        const val DRAFT_STRATEGY_ADAPTIVE = "adaptive"
 
-        private class IntVar(value: Int) {
+        fun normalizeDraftStrategy(strategy: String): String {
+            return if (strategy.trim().equals(DRAFT_STRATEGY_ADAPTIVE, ignoreCase = true)) {
+                DRAFT_STRATEGY_ADAPTIVE
+            } else {
+                DRAFT_STRATEGY_FIXED3
+            }
+        }
+
+        // JNI (completion_loop / heterospec_loop) looks up getValue() and inc() by name.
+        // Keep the class public and unstripped: R8 otherwise deletes inc() because Kotlin
+        // never calls it, then JNI abort: NoSuchMethodError IntVar.inc()V.
+        @Keep
+        class IntVar(value: Int) {
             @Volatile
             var value: Int = value
                 private set
 
+            @Keep
+            @JvmName("inc")
             fun inc() {
                 synchronized(this) {
                     value += 1
                 }
             }
         }
+
+        @Keep
+        @JvmField
+        @Suppress("unused")
+        val jniKeepIntVarInc: (IntVar) -> Unit = IntVar::inc
 
         private sealed interface State {
             data object Idle: State

@@ -22,8 +22,8 @@ enum class MessageType {
 // 推理模式枚举
 enum class InferenceMode {
     LOCAL,   // 本地推理
-    API,     // API推理
-    HETERO   // 异构推理
+    API,     // API推理（DeepSeek / Qwen，不含 HeteroSpec）
+    HETERO   // 异构推理，只走 JNI LLamaAndroid.sendHetero
 }
 
 // Prompt类枚举
@@ -89,6 +89,9 @@ class MainViewModel(
     var heteroServerUrl by mutableStateOf(LLamaAndroid.DEFAULT_HETERO_SERVER_URL)
         private set
 
+    var heteroDraftStrategy by mutableStateOf(LLamaAndroid.DRAFT_STRATEGY_FIXED3)
+        private set
+
     // 添加OCR编辑相关状态
     var isShowingOcrEditor by mutableStateOf(false)
         private set
@@ -139,6 +142,8 @@ class MainViewModel(
     private var testActiveTimeMs: Long = 0L // 仅统计每条样本从首 token 到末 token 的生成时长（排除两条之间的空闲）
 
     init {
+        llamaAndroid.setDraftStrategy(heteroDraftStrategy)
+        llamaAndroid.setUseQueueInGoodput(false)
         // 启动CPU监控（可开关）
         if (isCpuMonitorEnabled) {
             cpuMonitor.startMonitoring(100) { usage ->
@@ -368,6 +373,15 @@ class MainViewModel(
         messages += ChatMessage("HeteroSpec服务地址：$heteroServerUrl", MessageType.SYSTEM)
     }
 
+    fun updateHeteroDraftStrategy(strategy: String) {
+        llamaAndroid.setDraftStrategy(strategy)
+        heteroDraftStrategy = llamaAndroid.getDraftStrategy()
+    }
+
+    fun updateUseQueueInGoodput(enabled: Boolean) {
+        llamaAndroid.setUseQueueInGoodput(enabled)
+    }
+
     fun addImageMessage(bitmap: Bitmap) {
         messages += ChatMessage("", MessageType.USER, bitmap)
     }
@@ -432,7 +446,7 @@ class MainViewModel(
 
     // ===== 测试模式：整体速度统计 =====
 
-    fun startTest(totalItems: Int) {
+    fun startTest(totalItems: Int, strategyLabel: String? = null) {
         isTestRunning = true
         testTotal = totalItems
         testProcessed = 0
@@ -447,7 +461,8 @@ class MainViewModel(
         datasetCpuAvg = 0.0f
         // 清零展示值，后续由采样回调实时更新数据集平均
         cpuUsage = 0.0f
-        messages += ChatMessage("开始数据集测试，共 $totalItems 条", MessageType.SYSTEM)
+        val extra = if (strategyLabel.isNullOrEmpty()) "" else "，策略=$strategyLabel"
+        messages += ChatMessage("开始数据集测试，共 $totalItems 条$extra", MessageType.SYSTEM)
     }
 
     private fun updateTestTokens(tokens: Int) {
@@ -462,14 +477,15 @@ class MainViewModel(
         testProcessed += 1
     }
 
-    fun finishTest() {
+    fun finishTest(strategyLabel: String? = null) {
         if (!isTestRunning) return
         val activeSeconds = testActiveTimeMs / 1000.0
         lastTestSpeed = if (activeSeconds > 0) testTotalTokens / activeSeconds else 0.0
         datasetSpeed = lastTestSpeed
         isTestRunning = false
+        val extra = if (strategyLabel.isNullOrEmpty()) "" else "，策略=$strategyLabel"
         messages += ChatMessage(
-            "测试完成：$testProcessed/$testTotal，整体速度：${"%.2f".format(lastTestSpeed)} tokens/s",
+            "测试完成：$testProcessed/$testTotal$extra，整体速度：${"%.2f".format(lastTestSpeed)} tokens/s",
             MessageType.SYSTEM
         )
     }

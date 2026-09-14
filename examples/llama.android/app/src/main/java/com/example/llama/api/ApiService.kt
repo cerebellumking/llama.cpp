@@ -9,14 +9,14 @@ interface ApiService {
             return when (type) {
                 ApiType.DEEPSEEK -> DeepseekApiService.getInstance()
                 ApiType.QWEN -> QwenApiService.getInstance()
-                ApiType.HETEROSPEC -> HeteroSpecService.getInstance()
             }
         }
     }
 }
 
+// HeteroSpec 不走 ApiService，只通过 LLamaAndroid.sendHetero。
+// HeteroSpec 不走 ApiService，只通过 LLamaAndroid.sendHetero。
 enum class ApiType {
     DEEPSEEK,
-    QWEN,
-    HETEROSPEC
-} 
+    QWEN
+}

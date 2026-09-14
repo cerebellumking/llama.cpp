@@ -16,6 +16,7 @@ import android.provider.MediaStore
 import android.text.format.Formatter
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.foundation.Image
@@ -302,7 +303,9 @@ class MainActivity(
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        enableEdgeToEdge()
         super.onCreate(savedInstanceState)
+        LLamaAndroid.instance().setNativeLibraryDir(applicationInfo.nativeLibraryDir)
 
         // 初始化OCR引擎
         ocr = OCR(this)
@@ -712,11 +715,10 @@ fun AppBar(
         }
     }
 
-    // 应用栏 - 使用渐变背景
+    // 应用栏：背景延伸进状态栏，按钮落在安全区内，避免被时钟/电量挡住
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .height(64.dp)
             .background(
                 brush = Brush.horizontalGradient(
                     colors = listOf(
@@ -726,6 +728,16 @@ fun AppBar(
                 )
             )
     ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .windowInsetsPadding(
+                    WindowInsets.safeDrawing.only(
+                        WindowInsetsSides.Top + WindowInsetsSides.Horizontal
+                    )
+                )
+                .height(56.dp)
+        ) {
         val density = LocalDensity.current
         Row(
             verticalAlignment = Alignment.CenterVertically,
@@ -1001,6 +1013,7 @@ fun AppBar(
                 onCheckedChange = { enabled -> viewModel.updateCpuMonitorEnabled(enabled) }
             )
         }
+        }
 
         if (showHeteroServerDialog) {
             AlertDialog(
@@ -1060,11 +1073,27 @@ fun AppBar(
             val context = LocalContext.current
             TestDatasetDialog(
                 onDismiss = { showTestDialog = false },
-                onSelectDataset = { datasetName ->
+                onSelectDataset = { datasetName, strategy ->
                     showTestDialog = false
-                    // 启动测试
                     scope.launch {
-                        runDatasetTest(context, viewModel, datasetName, activity.ocrEngine())
+                        val strategies = if (strategy == DRAFT_STRATEGY_BOTH) {
+                            listOf(
+                                LLamaAndroid.DRAFT_STRATEGY_FIXED3,
+                                LLamaAndroid.DRAFT_STRATEGY_ADAPTIVE,
+                            )
+                        } else {
+                            listOf(LLamaAndroid.normalizeDraftStrategy(strategy))
+                        }
+                        for (s in strategies) {
+                            viewModel.updateHeteroDraftStrategy(s)
+                            runDatasetTest(
+                                context,
+                                viewModel,
+                                datasetName,
+                                activity.ocrEngine(),
+                                strategyLabel = s,
+                            )
+                        }
                     }
                 }
             )
@@ -1455,7 +1484,16 @@ fun InputArea(
     onCamera: () -> Unit,
     activity: MainActivity
 ) {
-    Column {
+    Column(
+        modifier = Modifier
+            .background(AppColors.BackgroundSecondary)
+            .windowInsetsPadding(
+                WindowInsets.safeDrawing
+                    .union(WindowInsets.tappableElement)
+                    .union(WindowInsets.ime)
+                    .only(WindowInsetsSides.Bottom + WindowInsetsSides.Horizontal)
+            )
+    ) {
         // 分割线
         HorizontalDivider(
             thickness = 1.dp,
@@ -1465,7 +1503,6 @@ fun InputArea(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .background(AppColors.BackgroundSecondary)
                 .padding(16.dp),
             verticalAlignment = Alignment.Bottom
         ) {
@@ -1689,12 +1726,15 @@ fun OcrEditDialog(
 
 // ===== 测试模式实现 =====
 
+private const val DRAFT_STRATEGY_BOTH = "both"
+
 @Composable
 private fun TestDatasetDialog(
     onDismiss: () -> Unit,
-    onSelectDataset: (String) -> Unit,
+    onSelectDataset: (String, String) -> Unit,
 ) {
     val context = LocalContext.current
+    var selectedStrategy by remember { mutableStateOf(DRAFT_STRATEGY_BOTH) }
     val datasets = remember {
         try {
             context.assets.list("datasets")?.toList()?.sorted() ?: emptyList()
@@ -1702,6 +1742,11 @@ private fun TestDatasetDialog(
             emptyList()
         }
     }
+    val strategyOptions = listOf(
+        LLamaAndroid.DRAFT_STRATEGY_FIXED3 to "固定 k=3",
+        LLamaAndroid.DRAFT_STRATEGY_ADAPTIVE to "自适应 k",
+        DRAFT_STRATEGY_BOTH to "两遍对照",
+    )
 
     Dialog(onDismissRequest = onDismiss) {
         Card(
@@ -1714,6 +1759,26 @@ private fun TestDatasetDialog(
             Column(modifier = Modifier.padding(16.dp)) {
                 Text("选择数据集", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary)
                 Spacer(modifier = Modifier.height(12.dp))
+                Text("草稿策略", fontSize = 14.sp, fontWeight = FontWeight.Medium, color = AppColors.TextSecondary)
+                Spacer(modifier = Modifier.height(4.dp))
+                Column {
+                    strategyOptions.forEach { (value, label) ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { selectedStrategy = value }
+                                .padding(vertical = 2.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            RadioButton(
+                                selected = selectedStrategy == value,
+                                onClick = { selectedStrategy = value }
+                            )
+                            Text(label, color = AppColors.TextPrimary, fontSize = 14.sp)
+                        }
+                    }
+                }
+                Spacer(modifier = Modifier.height(12.dp))
                 if (datasets.isEmpty()) {
                     Text("未找到数据集（请将数据放入 assets/datasets）", color = AppColors.TextSecondary)
                 } else {
@@ -1725,7 +1790,7 @@ private fun TestDatasetDialog(
                             Card(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .clickable { onSelectDataset(name) },
+                                    .clickable { onSelectDataset(name, selectedStrategy) },
                                 shape = RoundedCornerShape(8.dp),
                                 colors = CardDefaults.cardColors(containerColor = AppColors.Background)
                             ) {
@@ -1762,6 +1827,7 @@ private suspend fun runDatasetTest(
     viewModel: MainViewModel,
     datasetName: String,
     ocr: OCR,
+    strategyLabel: String? = null,
 ) {
     // 判定数据集类型：目录中的图片，或单文件 json/csv/txt
     val base = "datasets/$datasetName"
@@ -1776,7 +1842,7 @@ private suspend fun runDatasetTest(
             imageExts.any { lower.endsWith(it) }
         }.sorted()
 
-        viewModel.startTest(imageFiles.size)
+        viewModel.startTest(imageFiles.size, strategyLabel)
         for (file in imageFiles) {
             try {
                 context.assets.open("$base/$file").use { input ->
@@ -1793,7 +1859,7 @@ private suspend fun runDatasetTest(
                 viewModel.sendForTest_impl("")
             }
         }
-        viewModel.finishTest()
+        viewModel.finishTest(strategyLabel)
         return
     }
 
@@ -1819,11 +1885,11 @@ private suspend fun runDatasetTest(
         else -> readPromptsFromTxt(context, openedName)
     }
 
-    viewModel.startTest(prompts.size)
+    viewModel.startTest(prompts.size, strategyLabel)
     for (p in prompts) {
         viewModel.sendForTest_impl(p)
     }
-    viewModel.finishTest()
+    viewModel.finishTest(strategyLabel)
 }
 
 private fun readPromptsFromTxt(context: Context, assetPath: String): List<String> =

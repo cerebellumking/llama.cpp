@@ -25,12 +25,10 @@ android {
 
     buildTypes {
         debug {
-            isMinifyEnabled = true
-            isShrinkResources = true
-            proguardFiles(
-                getDefaultProguardFile("proguard-android.txt"),
-                "proguard-rules.pro"
-            )
+            // JNI looks up IntVar.inc() by name. Debug minify previously stripped
+            // that method (Kotlin never calls it) and aborted the app on send.
+            isMinifyEnabled = false
+            isShrinkResources = false
         }
         release {
             isMinifyEnabled = true
