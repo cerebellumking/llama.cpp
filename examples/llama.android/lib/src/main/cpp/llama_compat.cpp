@@ -1,3 +1,6 @@
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 #include <android/log.h>
 #include <algorithm>
 #include <array>
@@ -19,6 +22,7 @@
 #include "ggml-backend.h"
 #include "websocketpp/client.hpp"
 #include "websocketpp/config/asio_client.hpp"
+#include "heterospec_hotpath.hpp"
 #include <thread>
 #include <chrono>
 // Write C++ code here.
@@ -175,8 +179,20 @@ Java_android_llama_cpp_LLamaAndroid_new_1context(JNIEnv *env, jobject, jlong jmo
         return 0;
     }
 
-    int n_threads = std::max(1, std::min(8, (int) sysconf(_SC_NPROCESSORS_ONLN) - 2));
-    LOGi("Using %d threads", n_threads);
+    int nproc = (int) sysconf(_SC_NPROCESSORS_ONLN);
+    int n_threads = heterospec_hotpath::decode_thread_count(nproc);
+    const auto pinned = heterospec_hotpath::big_core_ids(nproc, n_threads);
+    const bool pinned_ok = heterospec_hotpath::pin_to_cpus(pinned);
+    LOGi("Using %d threads (nproc=%d pin=%d kleidiai=%d)",
+            n_threads,
+            nproc,
+            pinned_ok ? 1 : 0,
+#if defined(GGML_CPU_KLEIDIAI) && GGML_CPU_KLEIDIAI
+            1
+#else
+            0
+#endif
+    );
 
     llama_context_params ctx_params = llama_context_default_params();
 
@@ -281,6 +297,7 @@ Java_android_llama_cpp_LLamaAndroid_backend_1init(JNIEnv *env, jobject, jstring 
         if (path_to_backend && path_to_backend[0] != '\0') {
             LOGi("Loading backends from %s", path_to_backend);
             ggml_backend_load_all_from_path(path_to_backend);
+            LOGi("Requested backends from %s (KleidiAI CPU variants must be in this dir)", path_to_backend);
         } else {
             LOGi("nativeLibraryDir empty; calling ggml_backend_load_all()");
             ggml_backend_load_all();
@@ -555,6 +572,12 @@ struct CloudState {
     std::array<bool, 6> position_accept_ready{};
     int64_t icn_multi_total_wasted_tokens = 0;
     int64_t icn_multi_total_payload_bytes = 0;
+    bool has_draft_batch = false;
+    llama_batch draft_batch{};
+    bool has_prefetch = false;
+    llama_tokens prefetch_drafts;
+    std::vector<float> prefetch_confidences;
+    std::vector<float> prefetch_calibrated;
 };
 
 static uint32_t cloud_next_request_id(CloudState& state) {
@@ -862,37 +885,20 @@ static bool icn_multi_select_greedy_token(
         float& confidence) {
     const float * logits = llama_get_logits_ith(context, -1);
     const int n_vocab = llama_vocab_n_tokens(vocab);
-    if (!logits || n_vocab <= 0) {
+    int32_t selected = 0;
+    if (!heterospec_hotpath::greedy_argmax(logits, n_vocab, selected, confidence)) {
         return false;
     }
-
-    int best_id = -1;
-    float best_logit = -std::numeric_limits<float>::infinity();
-    float second_best_logit = -std::numeric_limits<float>::infinity();
-    for (int i = 0; i < n_vocab; ++i) {
-        const float value = logits[i];
-        if (!std::isfinite(value)) {
-            continue;
-        }
-        if (value > best_logit) {
-            second_best_logit = best_logit;
-            best_logit = value;
-            best_id = i;
-        } else if (value > second_best_logit) {
-            second_best_logit = value;
-        }
-    }
-    if (best_id < 0) {
-        return false;
-    }
-
-    token = static_cast<llama_token>(best_id);
-    const double margin = std::isfinite(second_best_logit)
-            ? static_cast<double>(best_logit - second_best_logit)
-            : 0.0;
-    confidence = static_cast<float>(1.0 / (1.0 + std::exp(-margin)));
-    confidence = std::max(0.0f, std::min(1.0f, confidence));
+    token = static_cast<llama_token>(selected);
     return true;
+}
+
+static llama_batch& ensure_draft_batch(CloudState& state) {
+    if (!state.has_draft_batch) {
+        state.draft_batch = llama_batch_init(state.max_n_draft + 1, 0, 1);
+        state.has_draft_batch = true;
+    }
+    return state.draft_batch;
 }
 
 static AdaptiveDraftResult generate_icn_multi_local_draft(
@@ -918,14 +924,13 @@ static AdaptiveDraftResult generate_icn_multi_local_draft(
     result.confidences.reserve(n_draft_max);
     result.calibrated_confidences.reserve(n_draft_max);
 
-    llama_batch batch = llama_batch_init(1, 0, 1);
+    llama_batch& batch = ensure_draft_batch(state);
     const llama_pos n_past = static_cast<llama_pos>(prompt_tgt.size());
 
     common_batch_clear(batch);
     common_batch_add(batch, id_last, n_past, { 0 }, true);
     if (llama_decode(context, batch) != 0) {
         LOGe("ICN-Multi-HeteroSpec draft decode failed while syncing last token");
-        llama_batch_free(batch);
         return result;
     }
 
@@ -985,8 +990,96 @@ static AdaptiveDraftResult generate_icn_multi_local_draft(
         }
     }
 
-    llama_batch_free(batch);
     return result;
+}
+
+static bool verify_ack_ready(CloudState& state) {
+    std::lock_guard<std::mutex> lock(state.mutex);
+    return state.has_verify_response || state.has_error || !state.is_connected;
+}
+
+struct OverlapPrefetch {
+    bool decoded_last_sent = false;
+    bool has_guessed_bonus = false;
+    llama_token guessed_bonus = 0;
+    llama_tokens drafts;
+    std::vector<float> confidences;
+    std::vector<float> calibrated;
+};
+
+static void overlap_while_waiting(
+        CloudState& state,
+        llama_context * context,
+        const llama_vocab * vocab,
+        const llama_tokens& sent_drafts,
+        llama_pos pos_base,
+        int n_draft_max,
+        OverlapPrefetch& prefetch) {
+    if (sent_drafts.empty() || n_draft_max <= 0 || verify_ack_ready(state)) {
+        return;
+    }
+    llama_batch& batch = ensure_draft_batch(state);
+    common_batch_clear(batch);
+    common_batch_add(
+            batch,
+            sent_drafts.back(),
+            pos_base + static_cast<llama_pos>(sent_drafts.size()),
+            { 0 },
+            true);
+    if (llama_decode(context, batch) != 0) {
+        return;
+    }
+    prefetch.decoded_last_sent = true;
+    while (!verify_ack_ready(state) && static_cast<int>(prefetch.drafts.size()) < n_draft_max) {
+        llama_token id = 0;
+        float confidence = 0.0f;
+        if (!icn_multi_select_greedy_token(context, vocab, id, confidence)) {
+            break;
+        }
+        const float calibrated = static_cast<float>(
+                icn_multi_calibrate_confidence_value(
+                        state,
+                        confidence,
+                        prefetch.has_guessed_bonus
+                                ? static_cast<int>(prefetch.drafts.size())
+                                : 0));
+        if (!prefetch.has_guessed_bonus) {
+            prefetch.guessed_bonus = id;
+            prefetch.has_guessed_bonus = true;
+            common_batch_clear(batch);
+            common_batch_add(
+                    batch,
+                    id,
+                    pos_base + static_cast<llama_pos>(sent_drafts.size()) + 1,
+                    { 0 },
+                    true);
+            if (llama_decode(context, batch) != 0) {
+                prefetch.has_guessed_bonus = false;
+                break;
+            }
+            continue;
+        }
+        prefetch.drafts.push_back(id);
+        prefetch.confidences.push_back(confidence);
+        prefetch.calibrated.push_back(calibrated);
+        if (static_cast<int>(prefetch.drafts.size()) >= n_draft_max) {
+            break;
+        }
+        common_batch_clear(batch);
+        common_batch_add(
+                batch,
+                id,
+                pos_base + static_cast<llama_pos>(sent_drafts.size()) + 1
+                        + static_cast<llama_pos>(prefetch.drafts.size()),
+                { 0 },
+                true);
+        if (llama_decode(context, batch) != 0) {
+            prefetch.drafts.pop_back();
+            prefetch.confidences.pop_back();
+            prefetch.calibrated.pop_back();
+            break;
+        }
+    }
 }
 
 static void update_adaptive_n_draft(
@@ -1296,6 +1389,10 @@ static void shutdown_cloud_state(CloudState& state) {
     if (state.client_thread.joinable()) {
         state.client_thread.join();
     }
+    if (state.has_draft_batch) {
+        llama_batch_free(state.draft_batch);
+        state.has_draft_batch = false;
+    }
     state.is_connected = false;
     state.connection_ready = false;
 }
@@ -1490,17 +1587,30 @@ Java_android_llama_cpp_LLamaAndroid_heterospec_1loop(
     const double estimated_queue_time = (state->use_queue_in_goodput && state->queue_time_ema_ready)
             ? state->queue_time_ema
             : 0.0;
-    AdaptiveDraftResult draft_result = generate_icn_multi_local_draft(
-            *state,
-            context,
-            vocab,
-            prompt_tgt,
-            id_last,
-            estimated_draft_per_token,
-            estimated_verify_wait_time,
-            estimated_network_time,
-            estimated_network_time_per_token,
-            estimated_queue_time);
+    bool used_prefetch = false;
+    AdaptiveDraftResult draft_result;
+    if (state->has_prefetch && !state->prefetch_drafts.empty()) {
+        used_prefetch = true;
+        draft_result.tokens = std::move(state->prefetch_drafts);
+        draft_result.confidences = std::move(state->prefetch_confidences);
+        draft_result.calibrated_confidences = std::move(state->prefetch_calibrated);
+        state->has_prefetch = false;
+        state->prefetch_drafts.clear();
+        state->prefetch_confidences.clear();
+        state->prefetch_calibrated.clear();
+    } else {
+        draft_result = generate_icn_multi_local_draft(
+                *state,
+                context,
+                vocab,
+                prompt_tgt,
+                id_last,
+                estimated_draft_per_token,
+                estimated_verify_wait_time,
+                estimated_network_time,
+                estimated_network_time_per_token,
+                estimated_queue_time);
+    }
     llama_tokens draft_tokens = std::move(draft_result.tokens);
     std::vector<float> draft_confidences = std::move(draft_result.confidences);
     std::vector<float> calibrated_confidences = std::move(draft_result.calibrated_confidences);
@@ -1509,11 +1619,9 @@ Java_android_llama_cpp_LLamaAndroid_heterospec_1loop(
         LOGe("ICN-Multi-HeteroSpec draft produced no tokens");
         return env->NewStringUTF("");
     }
-    const std::string icn_multi_icn_name = icn_multi_build_icn_name_v2(prompt_tgt, draft_tokens, static_cast<int>(draft_tokens.size()));
-    LOGi("icn_multi_icn_name=%s", icn_multi_icn_name.c_str());
-    LOGi("icn_multi_raw_conf=%s icn_multi_calibrated_p=%s",
-            icn_multi_join_floats(draft_confidences).c_str(),
-            icn_multi_join_floats(calibrated_confidences).c_str());
+    auto end1 = std::chrono::high_resolution_clock::now();
+    double draft_time = std::chrono::duration<double>(end1 - start1).count();
+    state->draft_times.push_back(draft_time);
     try {
         const uint32_t request_id = cloud_next_request_id(*state);
         const auto binary_msg = pack_token_request_v3(
@@ -1521,10 +1629,6 @@ Java_android_llama_cpp_LLamaAndroid_heterospec_1loop(
                 request_id,
                 draft_tokens);
         const int payload_bytes = static_cast<int>(binary_msg.size());
-
-        auto end1 = std::chrono::high_resolution_clock::now();
-        double draft_time = std::chrono::duration<double>(end1 - start1).count();
-        state->draft_times.push_back(draft_time);
 
         cloud_prepare_pending(*state, request_id);
         auto start = std::chrono::high_resolution_clock::now();
@@ -1534,6 +1638,12 @@ Java_android_llama_cpp_LLamaAndroid_heterospec_1loop(
             binary_msg.size(),
             websocketpp::frame::opcode::binary);
 
+        const std::string icn_multi_icn_name = icn_multi_build_icn_name_v2(prompt_tgt, draft_tokens, static_cast<int>(draft_tokens.size()));
+        LOGi("icn_multi_icn_name=%s", icn_multi_icn_name.c_str());
+        LOGi("icn_multi_raw_conf=%s icn_multi_calibrated_p=%s",
+                icn_multi_join_floats(draft_confidences).c_str(),
+                icn_multi_join_floats(calibrated_confidences).c_str());
+
         llama_tokens final_tokens;
         const int draft_count = static_cast<int>(draft_tokens.size());
         int accepted_draft_count = 0;
@@ -1542,6 +1652,23 @@ Java_android_llama_cpp_LLamaAndroid_heterospec_1loop(
         double queue_time = 0.0;
         uint32_t logged_verify_us = 0;
         uint32_t logged_queue_us = 0;
+        const llama_pos pos_base = static_cast<llama_pos>(prompt_tgt.size());
+        OverlapPrefetch prefetch;
+        if (!used_prefetch) {
+            const int n_draft_max = clamp_adaptive_n_draft(
+                    *state,
+                    state->draft_strategy == DraftStrategy::Adaptive
+                            ? state->max_n_draft
+                            : CloudState::kFixedNDraft);
+            overlap_while_waiting(
+                    *state,
+                    context,
+                    vocab,
+                    draft_tokens,
+                    pos_base,
+                    n_draft_max,
+                    prefetch);
+        }
 
         std::unique_lock<std::mutex> lock(state->mutex);
         const bool ready = state->cv.wait_for(lock, std::chrono::seconds(10), [state] {
@@ -1633,9 +1760,44 @@ Java_android_llama_cpp_LLamaAndroid_heterospec_1loop(
             state->prompt_tokens.insert(state->prompt_tokens.end(), final_tokens.begin(), final_tokens.end() - 1);
             state->n_past += final_tokens.size();
 
-            // 重置状态
+            const int32_t bonus_token = static_cast<int32_t>(final_tokens.back());
+            const int32_t guessed_bonus = prefetch.has_guessed_bonus
+                    ? static_cast<int32_t>(prefetch.guessed_bonus)
+                    : -1;
+            const bool hit = heterospec_hotpath::overlap_hit(
+                    accepted_draft_count,
+                    draft_count,
+                    bonus_token,
+                    guessed_bonus,
+                    static_cast<int>(prefetch.drafts.size()));
+            LOGi("hetero_overlap hit=%d used_prefetch=%d prefetch_k=%d guessed=%d bonus=%d",
+                    hit ? 1 : 0,
+                    used_prefetch ? 1 : 0,
+                    static_cast<int>(prefetch.drafts.size()),
+                    guessed_bonus,
+                    bonus_token);
             state->accepted_tokens.clear();
-            llama_memory_seq_rm(llama_get_memory(context), 0, state->n_past + 1, -1);
+            if (hit) {
+                state->has_prefetch = true;
+                state->prefetch_drafts = std::move(prefetch.drafts);
+                state->prefetch_confidences = std::move(prefetch.confidences);
+                state->prefetch_calibrated = std::move(prefetch.calibrated);
+            } else {
+                state->has_prefetch = false;
+                state->prefetch_drafts.clear();
+                state->prefetch_confidences.clear();
+                state->prefetch_calibrated.clear();
+                if (prefetch.decoded_last_sent || prefetch.has_guessed_bonus) {
+                    llama_memory_seq_rm(
+                            llama_get_memory(context),
+                            0,
+                            static_cast<llama_pos>(heterospec_hotpath::overlap_kv_trim_pos(
+                                    static_cast<int>(pos_base),
+                                    accepted_draft_count)),
+                            -1);
+                }
+                llama_memory_seq_rm(llama_get_memory(context), 0, state->n_past + 1, -1);
+            }
 
             // 处理输出
             for (const auto& token : final_tokens) {
