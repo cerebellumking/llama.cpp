@@ -30,6 +30,9 @@
     public void inc();
     public int getValue();
 }
+-keep class com.paddle.ocr.** { *; }
+-keep class ai.onnxruntime.** { *; }
+-keep class org.opencv.** { *; }
 -keepclassmembers class android.llama.cpp.LLamaAndroid$Companion$IntVar {
     public void inc();
     public int getValue();

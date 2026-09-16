@@ -19,10 +19,10 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
-import com.equationl.paddleocr4android.OCR
 import com.example.llama.Downloadable
 import com.example.llama.MainViewModel
 import com.example.llama.MessageKind
+import com.example.llama.ocr.DualOcrController
 import com.example.llama.ui.eval.DRAFT_STRATEGY_BOTH
 import com.example.llama.ui.eval.EvalRail
 import com.example.llama.ui.eval.EvalSettingsSheet
@@ -37,7 +37,7 @@ fun ReportWorkspaceRoute(
     viewModel: MainViewModel,
     dm: DownloadManager,
     models: List<Downloadable>,
-    ocr: OCR,
+    ocr: DualOcrController,
     onCamera: () -> Unit,
     onPickImage: () -> Unit,
     modifier: Modifier = Modifier,
@@ -123,6 +123,7 @@ fun ReportWorkspaceRoute(
             models = models,
             dm = dm,
             evalUnlocked = evalUnlocked,
+            ocr = ocr,
             onDismiss = { showSettings = false },
         )
     }

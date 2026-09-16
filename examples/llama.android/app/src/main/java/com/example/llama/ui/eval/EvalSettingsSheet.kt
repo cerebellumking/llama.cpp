@@ -27,16 +27,21 @@ import androidx.compose.runtime.mutableDoubleStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.collectAsState
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.net.toUri
 import com.example.llama.Downloadable
 import com.example.llama.MainViewModel
+import com.example.llama.ocr.DualOcrController
+import com.example.llama.ocr.OcrBackend
 import com.example.llama.api.ApiType
 import com.example.llama.promptModeForModel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -45,6 +50,7 @@ fun EvalSettingsSheet(
     models: List<Downloadable>,
     dm: DownloadManager,
     evalUnlocked: Boolean,
+    ocr: DualOcrController,
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -58,6 +64,9 @@ fun EvalSettingsSheet(
     var downloadProgress by remember { mutableDoubleStateOf(0.0) }
     var downloadId by remember { mutableLongStateOf(-1L) }
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val scope = rememberCoroutineScope()
+    val ocrActive by ocr.activeId.collectAsState()
+    val ocrStatus by ocr.status.collectAsState()
 
     LaunchedEffect(downloadId) {
         if (downloadId == -1L) return@LaunchedEffect
@@ -124,6 +133,26 @@ fun EvalSettingsSheet(
                 }
             ) {
                 Text("保存地址")
+            }
+            HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+            Text("检验单识别", style = MaterialTheme.typography.titleMedium)
+            Spacer(Modifier.height(4.dp))
+            Text(
+                text = ocrStatus,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            TextButton(
+                onClick = { scope.launch { ocr.setPreferred(OcrBackend.ONNX_V6) } },
+                enabled = ocrActive != OcrBackend.ONNX_V6,
+            ) {
+                Text("使用 PP-OCRv6（ONNX）")
+            }
+            TextButton(
+                onClick = { scope.launch { ocr.setPreferred(OcrBackend.LITE_V5) } },
+                enabled = ocrActive != OcrBackend.LITE_V5,
+            ) {
+                Text("切回 PP-OCRv5（当前可回退版本）")
             }
             HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
             Text("选择模型", style = MaterialTheme.typography.titleMedium)

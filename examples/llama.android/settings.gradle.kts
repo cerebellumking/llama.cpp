@@ -18,3 +18,4 @@ rootProject.name = "AiChat"
 include(":app")
 include(":lib")
 include(":PaddleOCR4Android")
+include(":ppocr-sdk")

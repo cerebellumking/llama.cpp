@@ -20,6 +20,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.lifecycle.lifecycleScope
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.Surface
 import androidx.compose.ui.Modifier
@@ -28,16 +29,13 @@ import androidx.core.content.getSystemService
 import com.canhub.cropper.CropImageContract
 import com.canhub.cropper.CropImageContractOptions
 import com.canhub.cropper.CropImageOptions
-import com.equationl.paddleocr4android.CpuPowerMode
-import com.equationl.paddleocr4android.OCR
-import com.equationl.paddleocr4android.OcrConfig
-import com.equationl.paddleocr4android.bean.OcrResult
-import com.equationl.paddleocr4android.callback.OcrInitCallback
-import com.equationl.paddleocr4android.callback.OcrRunCallback
+import com.example.llama.ocr.DualOcrController
+import com.example.llama.ocr.OcrBackend
 import com.example.llama.ui.theme.LlamaAndroidTheme
 import com.example.llama.ui.workspace.ReportWorkspaceRoute
 import java.io.File
 import java.io.FileOutputStream
+import kotlinx.coroutines.launch
 
 class MainActivity(
     activityManager: ActivityManager? = null,
@@ -50,7 +48,7 @@ class MainActivity(
     private val clipboardManager by lazy { clipboardManager ?: getSystemService<ClipboardManager>()!! }
 
     private val viewModel: MainViewModel by viewModels()
-    private lateinit var ocr: OCR
+    private lateinit var dualOcr: DualOcrController
 
     private val requestPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -98,23 +96,18 @@ class MainActivity(
     }
 
     private fun processImage(bitmap: Bitmap) {
-        try {
-            viewModel.log("开始识别文字...")
-            ocr.run(bitmap, object : OcrRunCallback {
-                override fun onSuccess(result: OcrResult) {
-                    val cleanedText = cleanOcrText(result.simpleText)
-                    viewModel.log("OCR原始结果：${result.simpleText}")
-                    viewModel.log("OCR清洗后结果：$cleanedText")
-                    viewModel.addImageMessage(bitmap)
-                    viewModel.showOcrEditor(cleanedText, bitmap)
-                }
-
-                override fun onFail(e: Throwable) {
-                    viewModel.log("文字识别失败：${e.message}")
-                }
-            })
-        } catch (e: Exception) {
-            viewModel.log("调用OCR失败：${e.message}")
+        lifecycleScope.launch {
+            try {
+                viewModel.log("开始识别文字...")
+                val rawText = dualOcr.recognize(bitmap)
+                val cleanedText = cleanOcrText(rawText)
+                viewModel.log("OCR原始结果：$rawText")
+                viewModel.log("OCR清洗后结果：$cleanedText")
+                viewModel.addImageMessage(bitmap)
+                viewModel.showOcrEditor(cleanedText, bitmap)
+            } catch (e: Exception) {
+                viewModel.log("文字识别失败：${e.message}")
+            }
         }
     }
 
@@ -127,7 +120,7 @@ class MainActivity(
         pickImageLauncher.launch("image/*")
     }
 
-    fun ocrEngine(): OCR = ocr
+    fun ocrEngine(): DualOcrController = dualOcr
 
     private fun checkCameraPermission() {
         when {
@@ -169,29 +162,16 @@ class MainActivity(
         super.onCreate(savedInstanceState)
         LLamaAndroid.instance().setNativeLibraryDir(applicationInfo.nativeLibraryDir)
 
-        ocr = OCR(this)
-        val config = OcrConfig()
-        config.modelPath = "models/ch_PP-OCRv5"
-        config.labelPath = "labels/ppocr_keys_v5.txt"
-        config.isRunDet = true
-        config.isRunCls = true
-        config.isRunRec = true
-        config.clsModelFilename = "cls.nb"
-        config.detModelFilename = "det.nb"
-        config.recModelFilename = "rec.nb"
-        config.cpuPowerMode = CpuPowerMode.LITE_POWER_FULL
-        config.isDrwwTextPositionBox = false
-
-        viewModel.log("正在加载OCR模型...")
-        ocr.initModel(config, object : OcrInitCallback {
-            override fun onSuccess() {
-                viewModel.log("OCR模型加载成功")
-            }
-
-            override fun onFail(e: Throwable) {
+        val preferences = getSharedPreferences(OcrBackend.PREFS, MODE_PRIVATE)
+        dualOcr = DualOcrController(this, preferences, viewModel::log)
+        viewModel.log("正在加载OCR模型…")
+        lifecycleScope.launch {
+            try {
+                dualOcr.start()
+            } catch (e: Exception) {
                 viewModel.log("OCR模型加载失败: $e")
             }
-        })
+        }
 
         StrictMode.setVmPolicy(
             VmPolicy.Builder(StrictMode.getVmPolicy())
@@ -213,7 +193,7 @@ class MainActivity(
                         viewModel = viewModel,
                         dm = downloadManager,
                         models = models,
-                        ocr = ocr,
+                        ocr = dualOcr,
                         onCamera = { startCamera() },
                         onPickImage = { pickImage() },
                     )
@@ -224,7 +204,7 @@ class MainActivity(
 
     override fun onDestroy() {
         super.onDestroy()
-        ocr.releaseModel()
+        dualOcr.release()
     }
 
     private fun saveBitmapToCache(bitmap: Bitmap): Uri {

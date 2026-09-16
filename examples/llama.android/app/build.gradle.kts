@@ -7,6 +7,7 @@ plugins {
 android {
     namespace = "com.example.llama"
     compileSdk = 36
+    ndkVersion = "27.0.12077973"
 
     defaultConfig {
         applicationId = "com.example.llama.aichat"
@@ -20,6 +21,9 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
             useSupportLibrary = true
+        }
+        ndk {
+            abiFilters += listOf("arm64-v8a", "x86_64")
         }
     }
 
@@ -49,6 +53,38 @@ android {
     kotlin {
         jvmToolchain(17)
     }
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
+            pickFirsts += "**/libc++_shared.so"
+        }
+    }
+}
+
+val alignedLibcxxDir = layout.buildDirectory.dir("generated/alignedJniLibs")
+
+fun ndkLlvmPrebuilt(ndkHome: java.io.File): java.io.File {
+    val root = ndkHome.resolve("toolchains/llvm/prebuilt")
+    val hosts = listOf("darwin-x86_64", "darwin-aarch64", "linux-x86_64", "linux-aarch64")
+    return hosts.map { root.resolve(it) }.firstOrNull { it.isDirectory }
+        ?: error("NDK llvm prebuilt not found under $root")
+}
+
+val copyAlignedLibcxx = tasks.register<Copy>("copyAlignedLibcxx") {
+    val libRoot = ndkLlvmPrebuilt(android.ndkDirectory).resolve("sysroot/usr/lib")
+    into(alignedLibcxxDir)
+    from(libRoot.resolve("aarch64-linux-android/libc++_shared.so")) {
+        into("arm64-v8a")
+    }
+    from(libRoot.resolve("x86_64-linux-android/libc++_shared.so")) {
+        into("x86_64")
+    }
+}
+
+android.sourceSets.getByName("main").jniLibs.srcDir(alignedLibcxxDir)
+
+tasks.matching { it.name == "preBuild" }.configureEach {
+    dependsOn(copyAlignedLibcxx)
 }
 
 dependencies {
@@ -70,6 +106,7 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation(project(":lib"))
     implementation(project(":PaddleOCR4Android"))
+    implementation(project(":ppocr-sdk"))
 
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)

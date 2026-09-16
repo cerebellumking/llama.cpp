@@ -3,16 +3,12 @@ package com.example.llama.ui.eval
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
-import com.equationl.paddleocr4android.OCR
-import com.equationl.paddleocr4android.bean.OcrResult
-import com.equationl.paddleocr4android.callback.OcrRunCallback
 import com.example.llama.MainViewModel
 import com.example.llama.cleanOcrText
+import com.example.llama.ocr.DualOcrController
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.util.Locale
-import kotlin.coroutines.resume
-import kotlinx.coroutines.suspendCancellableCoroutine
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -20,7 +16,7 @@ suspend fun runDatasetTest(
     context: Context,
     viewModel: MainViewModel,
     datasetName: String,
-    ocr: OCR,
+    ocr: DualOcrController,
     strategyLabel: String? = null,
 ) {
     val base = "datasets/$datasetName"
@@ -142,19 +138,9 @@ private fun readPromptsFromJson(context: Context, assetPath: String): List<Strin
         emptyList()
     }
 
-private suspend fun runOcrSuspend(ocr: OCR, bitmap: Bitmap): String =
-    suspendCancellableCoroutine { cont ->
-        try {
-            ocr.run(bitmap, object : OcrRunCallback {
-                override fun onSuccess(result: OcrResult) {
-                    cont.resume(cleanOcrText(result.simpleText))
-                }
-
-                override fun onFail(e: Throwable) {
-                    cont.resume("")
-                }
-            })
-        } catch (_: Exception) {
-            cont.resume("")
-        }
+private suspend fun runOcrSuspend(ocr: DualOcrController, bitmap: Bitmap): String =
+    try {
+        cleanOcrText(ocr.recognize(bitmap))
+    } catch (_: Exception) {
+        ""
     }
