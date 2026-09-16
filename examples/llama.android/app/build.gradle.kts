@@ -67,7 +67,6 @@ dependencies {
     implementation("androidx.camera:camera-lifecycle:1.5.1")
     implementation("androidx.camera:camera-view:1.5.1")
     implementation("com.github.CanHub:Android-Image-Cropper:4.3.2")
-    implementation("com.github.jeziellago:compose-markdown:0.5.7")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation(project(":lib"))
     implementation(project(":PaddleOCR4Android"))

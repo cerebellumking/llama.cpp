@@ -10,79 +10,56 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.llama.api.ApiService
 import com.example.llama.api.ApiType
+import java.io.IOException
+import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-
-// 消息类型枚举
-enum class MessageType {
-    USER,    // 用户输入
-    SYSTEM,  // 系统输出
-}
-
-// 推理模式枚举
-enum class InferenceMode {
-    LOCAL,   // 本地推理
-    API,     // API推理（DeepSeek / Qwen，不含 HeteroSpec）
-    HETERO   // 异构推理，只走 JNI LLamaAndroid.sendHetero
-}
-
-// Prompt类枚举
-enum class PromptMode {
-    QWEN2,
-    DEEPSEEk,
-    QWEN3
-}
-// 消息数据类
-data class ChatMessage(
-    val content: String,
-    val type: MessageType,
-    val image: Bitmap? = null
-)
+import kotlinx.coroutines.withContext
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import org.json.JSONObject
 
 class MainViewModel(
     private val llamaAndroid: LLamaAndroid = LLamaAndroid.instance()
-): ViewModel() {
+) : ViewModel() {
 
     private val tag: String? = this::class.simpleName
 
-    var messages by mutableStateOf(listOf(ChatMessage("Initializing...", MessageType.SYSTEM)))
+    var messages by mutableStateOf(emptyList<ChatMessage>())
         private set
 
     var message by mutableStateOf("")
         private set
 
-    // 添加推理速度状态
     var inferenceSpeed by mutableStateOf(0.0)
         private set
 
-    // 添加CPU利用率状态
     var cpuUsage by mutableStateOf(0.0f)
         private set
 
-    // CPU监控开关
     var isCpuMonitorEnabled by mutableStateOf(false)
         private set
 
-    // 推理期间 CPU 采样（平均值 = 累加 / 次数）
     var isInferenceRunning by mutableStateOf(false)
         private set
     private var cpuSampleSum = 0.0f
     private var cpuSampleCount = 0
 
-    // 测试模式下：数据集级别 CPU 采样（平均值 = 累加 / 次数）
     private var datasetCpuSampleSum = 0.0f
     private var datasetCpuSampleCount = 0
     var datasetCpuAvg by mutableStateOf(0.0f)
         private set
 
-    // 添加推理模式状态
     var inferenceMode by mutableStateOf(InferenceMode.LOCAL)
         private set
 
     var promptMode by mutableStateOf(PromptMode.QWEN2)
-        set
 
-    // 添加API类型状态
     var currentApiType by mutableStateOf(ApiType.DEEPSEEK)
         private set
 
@@ -92,7 +69,6 @@ class MainViewModel(
     var heteroDraftStrategy by mutableStateOf(LLamaAndroid.DRAFT_STRATEGY_FIXED3)
         private set
 
-    // 添加OCR编辑相关状态
     var isShowingOcrEditor by mutableStateOf(false)
         private set
 
@@ -102,24 +78,46 @@ class MainViewModel(
     var ocrSourceImage by mutableStateOf<Bitmap?>(null)
         private set
 
-    var editingMessageIndex by mutableStateOf(-1)
+    var editingMessageId by mutableStateOf<String?>(null)
         private set
 
     var editingText by mutableStateOf("")
         private set
 
-    // CPU监控器
+    var isModelLoaded by mutableStateOf(false)
+        private set
+
+    var loadedModelName by mutableStateOf<String?>(null)
+        private set
+
+    var connectionState by mutableStateOf(ConnectionState.Unknown)
+        private set
+
+    var healthJson by mutableStateOf("")
+        private set
+
+    var gpuQueueDepth by mutableStateOf<Int?>(null)
+        private set
+
+    var errorBanner by mutableStateOf<String?>(null)
+        private set
+
+    var lastFailedPrompt by mutableStateOf<String?>(null)
+        private set
+
     private val cpuMonitor = CpuMonitor()
 
-    // 获取当前API服务实例
     private val apiService: ApiService
         get() = ApiService.getInstance(currentApiType)
 
     private var lastTokenTime = System.currentTimeMillis()
     private var tokenCount = 0
     private var isFirstToken = true
+    private val pendingStream = StringBuilder()
+    private var lastStreamFlushAt = 0L
+    private var lastDatasetSpeedUiAt = 0L
+    private val streamFlushIntervalMs = 64L
 
-    // 测试模式相关状态（面向整个数据集的速度统计）
     var isTestRunning by mutableStateOf(false)
         private set
 
@@ -129,50 +127,56 @@ class MainViewModel(
     var testProcessed by mutableStateOf(0)
         private set
 
-    // 数据集整体速度（tokens/s）
     var datasetSpeed by mutableStateOf(0.0)
         private set
 
-    // 上一次测试完成时的整体速度（用于测试结束后仍显示）
     var lastTestSpeed by mutableStateOf(0.0)
         private set
 
     private var testStartTimeMs: Long = 0L
     private var testTotalTokens: Int = 0
-    private var testActiveTimeMs: Long = 0L // 仅统计每条样本从首 token 到末 token 的生成时长（排除两条之间的空闲）
+    private var testActiveTimeMs: Long = 0L
+
+    private var generateJob: Job? = null
+    private var streamingAssistantId: String? = null
+    private var stoppedByUser = false
+    private var generationSeq = 0
+
+    private val httpClient = OkHttpClient.Builder()
+        .callTimeout(5, TimeUnit.SECONDS)
+        .connectTimeout(4, TimeUnit.SECONDS)
+        .build()
+
+    val canSend: Boolean
+        get() = inferenceMode == InferenceMode.API || isModelLoaded
 
     init {
         llamaAndroid.setDraftStrategy(heteroDraftStrategy)
         llamaAndroid.setUseQueueInGoodput(false)
-        // 启动CPU监控（可开关）
-        if (isCpuMonitorEnabled) {
-            cpuMonitor.startMonitoring(100) { usage ->
-                Log.d("MainViewModel", "CPU usage updated: $usage%")
-                if (isTestRunning) {
-                    datasetCpuSampleSum += usage
-                    datasetCpuSampleCount += 1
-                    datasetCpuAvg = if (datasetCpuSampleCount > 0) datasetCpuSampleSum / datasetCpuSampleCount else 0.0f
-                    cpuUsage = datasetCpuAvg
-                } else if (isInferenceRunning) {
-                    cpuSampleSum += usage
-                    cpuSampleCount += 1
-                    cpuUsage = if (cpuSampleCount > 0) cpuSampleSum / cpuSampleCount else 0.0f
+        viewModelScope.launch {
+            while (isActive) {
+                if (inferenceMode == InferenceMode.HETERO) {
+                    pingHealthz()
+                } else {
+                    connectionState = when (inferenceMode) {
+                        InferenceMode.API -> ConnectionState.Online
+                        else -> ConnectionState.Unknown
+                    }
                 }
+                delay(15_000)
             }
         }
     }
 
     override fun onCleared() {
         super.onCleared()
-
-        // 停止CPU监控
         cpuMonitor.stopMonitoring()
-
+        generateJob?.cancel()
         viewModelScope.launch {
             try {
                 llamaAndroid.unload()
             } catch (exc: IllegalStateException) {
-                messages += ChatMessage(exc.message!!, MessageType.SYSTEM)
+                appendEval(exc.message ?: "unload failed")
             }
         }
     }
@@ -181,17 +185,27 @@ class MainViewModel(
         if (enabled == isCpuMonitorEnabled) return
         isCpuMonitorEnabled = enabled
         if (enabled) {
-            cpuMonitor.startMonitoring(100) { usage ->
-                Log.d("MainViewModel", "CPU usage updated: $usage%")
+            cpuMonitor.startMonitoring(500) { usage ->
+                if (!isTestRunning && !isInferenceRunning) return@startMonitoring
                 if (isTestRunning) {
                     datasetCpuSampleSum += usage
                     datasetCpuSampleCount += 1
-                    datasetCpuAvg = if (datasetCpuSampleCount > 0) datasetCpuSampleSum / datasetCpuSampleCount else 0.0f
-                    cpuUsage = datasetCpuAvg
-                } else if (isInferenceRunning) {
+                    val avg = if (datasetCpuSampleCount > 0) {
+                        datasetCpuSampleSum / datasetCpuSampleCount
+                    } else {
+                        0.0f
+                    }
+                    if (kotlin.math.abs(cpuUsage - avg) >= 0.3f) {
+                        datasetCpuAvg = avg
+                        cpuUsage = avg
+                    }
+                } else {
                     cpuSampleSum += usage
                     cpuSampleCount += 1
-                    cpuUsage = if (cpuSampleCount > 0) cpuSampleSum / cpuSampleCount else 0.0f
+                    val avg = if (cpuSampleCount > 0) cpuSampleSum / cpuSampleCount else 0.0f
+                    if (kotlin.math.abs(cpuUsage - avg) >= 0.3f) {
+                        cpuUsage = avg
+                    }
                 }
             }
         } else {
@@ -212,138 +226,175 @@ class MainViewModel(
     }
 
     fun send(skipAddingUserMessage: Boolean = false) {
+        val seq = ++generationSeq
+        generateJob?.cancel()
+        generateJob = null
+
         val text = message
         message = ""
+        errorBanner = null
 
-        // 检查是否是图片消息（通过检查最后一条消息是否包含图片）
-        val isImageMessage = messages.lastOrNull { it.type == MessageType.USER }?.image != null
+        val lastReport = messages.lastOrNull { it.kind == MessageKind.Report }
+        val isImageMessage = lastReport?.image != null
 
-        // 如果不是图片消息且没有跳过添加用户消息，则显示用户输入
-        if (!isImageMessage && !skipAddingUserMessage) {
-            messages += ChatMessage(text, MessageType.USER)
+        if (!isImageMessage && !skipAddingUserMessage && text.isNotBlank()) {
+            messages += ChatMessage.report(text)
         }
 
-        // 添加空的系统消息，用于接收输出
-        messages += ChatMessage("", MessageType.SYSTEM)
+        val assistant = ChatMessage.assistant("")
+        streamingAssistantId = assistant.id
+        messages += assistant
 
-        // 重置推理速度计数
         lastTokenTime = System.currentTimeMillis()
         tokenCount = 0
         inferenceSpeed = 0.0
         isFirstToken = true
+        pendingStream.setLength(0)
+        lastStreamFlushAt = 0L
+        stoppedByUser = false
+        lastFailedPrompt = text
 
         beginInferenceMonitoring()
-        viewModelScope.launch {
-            // 构建完整的对话历史，包含系统提示词
-
+        generateJob = viewModelScope.launch {
             try {
-                var fullPrompt = ""
-                when (promptMode) {
-                    PromptMode.QWEN2 -> {
-                        fullPrompt = "You are Qwen, created by Alibaba Cloud. You are a helpful assistant.\n\nUser: $text\n\nAssistant:"
-//                        fullPrompt =
-//                            "<｜begin▁of▁sentence｜>You are Qwen, created by Alibaba Cloud. You are a helpful assistant.<｜User｜>$text<｜Assistant｜><think>"
-                    }
-
-                    PromptMode.QWEN3 -> {
-                        fullPrompt = "You are Qwen, created by Alibaba Cloud. You are a helpful assistant.\n\nUser: $text\n\nAssistant:\n<think></think>"
-//                        fullPrompt =
-//                            "<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.<|im_end|>\n<|im_start|>user\n$text<|im_end|>\n<|im_start|>assistant\n"
-                    }
-                    PromptMode.DEEPSEEk -> {
-                        fullPrompt = text
-                    }
+                val fullPrompt = buildPrompt(text)
+                val flow = when (inferenceMode) {
+                    InferenceMode.LOCAL -> llamaAndroid.send(fullPrompt)
+                    InferenceMode.API -> apiService.send(fullPrompt)
+                    InferenceMode.HETERO -> llamaAndroid.sendHetero(fullPrompt, serverUrl = heteroServerUrl)
                 }
-                when (inferenceMode) {
-                    InferenceMode.LOCAL -> {
-                        llamaAndroid.send(fullPrompt)
-                            .catch {
-                                Log.e(tag, "send() failed", it)
-                                messages += ChatMessage(it.message!!, MessageType.SYSTEM)
-                            }
-                            .collect { (str, tokens) ->
-                                // 更新最后一条系统消息
-                                updateMessageAndSpeed(str, tokens)
-                            }
-                    }
-                    InferenceMode.API -> {
-                        apiService.send(fullPrompt)
-                            .catch {
-                                Log.e(tag, "API send() failed", it)
-                                messages += ChatMessage(it.message!!, MessageType.SYSTEM)
-                            }
-                            .collect { (str, tokens) ->
-                                // 更新最后一条系统消息
-                                updateMessageAndSpeed(str, tokens)
-                            }
-                    }
-                    InferenceMode.HETERO -> {
-                        llamaAndroid.sendHetero(fullPrompt, serverUrl = heteroServerUrl)
-                            .catch {
-                                Log.e(tag, "send() failed", it)
-                                messages += ChatMessage(it.message!!, MessageType.SYSTEM)
-                            }
-                            .collect { (str, tokens) ->
-                                // 更新最后一条系统消息
-                                updateMessageAndSpeed(str, tokens)
-                            }
-                    }
+                flow.catch { err ->
+                    Log.e(tag, "send() failed", err)
+                    appendEval(err.message ?: "send failed")
+                    errorBanner = err.message ?: "解读失败"
+                }.collect { (str, tokens) ->
+                    lastFailedPrompt = null
+                    updateMessageAndSpeed(str, tokens)
                 }
+            } catch (e: CancellationException) {
+                if (!stoppedByUser && seq == generationSeq) {
+                    markStopped()
+                }
+                throw e
             } catch (e: Exception) {
                 Log.e(tag, "Error during inference", e)
-                messages += ChatMessage("Error: ${e.message}", MessageType.SYSTEM)
+                appendEval("Error: ${e.message}")
+                errorBanner = e.message ?: "解读失败"
             } finally {
-                endInferenceMonitoring()
+                if (seq == generationSeq) {
+                    flushStreamingText()
+                    endInferenceMonitoring()
+                    generateJob = null
+                }
             }
         }
     }
 
-    private fun updateMessageAndSpeed(str: String, tokens: Int) {
-        // 更新最后一条系统消息
-        val lastMessage = messages.last()
-        messages = messages.dropLast(1) + ChatMessage(lastMessage.content + str, MessageType.SYSTEM)
+    fun stopGeneration() {
+        if (generateJob == null && !isInferenceRunning) return
+        stoppedByUser = true
+        generationSeq++
+        generateJob?.cancel()
+        generateJob = null
+        flushStreamingText()
+        markStopped()
+        endInferenceMonitoring()
+    }
 
-        // 更新token计数
-        tokenCount += tokens
+    fun retryLast() {
+        val prompt = lastFailedPrompt ?: return
+        errorBanner = null
+        message = prompt
+        send(skipAddingUserMessage = true)
+    }
+
+    fun dismissError() {
+        errorBanner = null
+    }
+
+    private fun markStopped() {
+        val id = streamingAssistantId ?: return
+        messages = messages.map { msg ->
+            if (msg.id != id) {
+                msg
+            } else {
+                val text = msg.content.trim()
+                msg.copy(content = if (text.isEmpty()) "已停止" else "$text\n\n（已停止）")
+            }
+        }
+    }
+
+    private fun buildPrompt(text: String): String = when (promptMode) {
+        PromptMode.QWEN2 ->
+            "You are Qwen, created by Alibaba Cloud. You are a helpful assistant.\n\nUser: $text\n\nAssistant:"
+        PromptMode.QWEN3 ->
+            "You are Qwen, created by Alibaba Cloud. You are a helpful assistant.\n\nUser: $text\n\nAssistant:\n<think></think>"
+        PromptMode.DEEPSEEk -> text
+    }
+
+    private fun updateMessageAndSpeed(str: String, tokens: Int) {
+        if (str.isNotEmpty()) pendingStream.append(str)
+        if (tokens > 0) tokenCount += tokens
         val currentTime = System.currentTimeMillis()
-        val timeDiff = (currentTime - lastTokenTime) / 1000.0  // 转换为秒
+        val timeDiff = (currentTime - lastTokenTime) / 1000.0
 
         if (isFirstToken) {
-            // 第一个token不计入速度统计
             lastTokenTime = currentTime
             isFirstToken = false
-        } else if (timeDiff >= 1.0) { // 每秒更新一次速度
-            inferenceSpeed = tokenCount / timeDiff
+        } else if (timeDiff >= 1.0) {
+            val speed = tokenCount / timeDiff
+            if (kotlin.math.abs(speed - inferenceSpeed) >= 0.02) {
+                inferenceSpeed = speed
+            }
+            tokenCount = 0
+            lastTokenTime = currentTime
         }
+        if (currentTime - lastStreamFlushAt >= streamFlushIntervalMs) {
+            flushStreamingText()
+        }
+    }
+
+    private fun flushStreamingText() {
+        if (pendingStream.isEmpty()) return
+        val id = streamingAssistantId ?: messages.lastOrNull { it.kind == MessageKind.Assistant }?.id
+        if (id == null) {
+            pendingStream.setLength(0)
+            return
+        }
+        val chunk = pendingStream.toString()
+        pendingStream.setLength(0)
+        lastStreamFlushAt = System.currentTimeMillis()
+        val idx = messages.indexOfFirst { it.id == id }
+        if (idx < 0) return
+        val next = messages.toMutableList()
+        next[idx] = next[idx].copy(content = next[idx].content + chunk)
+        messages = next
     }
 
     fun load(pathToModel: String, isHetero: Boolean = false) {
         viewModelScope.launch {
             try {
-                // 切换到本地模式
-                if(isHetero) {
-                    inferenceMode = InferenceMode.HETERO
-                } else {
-                    inferenceMode = InferenceMode.LOCAL
-                }
-
-                // 先卸载当前模型
+                inferenceMode = if (isHetero) InferenceMode.HETERO else InferenceMode.LOCAL
                 try {
                     llamaAndroid.unload()
-                } catch (e: IllegalStateException) {
-                    // 忽略卸载错误
+                } catch (_: IllegalStateException) {
                 }
-                // 加载新模型
+                isModelLoaded = false
                 llamaAndroid.load(pathToModel)
+                isModelLoaded = true
                 val fileName = pathToModel.substringAfterLast("/")
-                if(isHetero){
-                    messages += ChatMessage("使用草稿模型：$fileName", MessageType.SYSTEM)
+                loadedModelName = fileName
+                if (isHetero) {
+                    appendEval("使用草稿模型：$fileName")
+                    pingHealthz()
                 } else {
-                    messages += ChatMessage("已切换到模型：$fileName", MessageType.SYSTEM)
+                    appendEval("已切换到模型：$fileName")
                 }
             } catch (exc: IllegalStateException) {
                 Log.e(tag, "load() failed", exc)
-                messages += ChatMessage(exc.message!!, MessageType.SYSTEM)
+                isModelLoaded = false
+                loadedModelName = null
+                appendEval(exc.message ?: "load failed")
             }
         }
     }
@@ -353,24 +404,36 @@ class MainViewModel(
     }
 
     fun clear() {
-        messages = listOf(ChatMessage("已清除对话历史", MessageType.SYSTEM))
+        generateJob?.cancel()
+        messages = listOf(ChatMessage.evalLog("已清除对话历史"))
         inferenceSpeed = 0.0
+        errorBanner = null
+        streamingAssistantId = null
     }
 
     fun log(message: String) {
-        messages += ChatMessage(message, MessageType.SYSTEM)
+        appendEval(message)
+    }
+
+    private fun appendEval(text: String) {
+        messages += ChatMessage.evalLog(text)
     }
 
     fun switchToApiMode(type: ApiType) {
         currentApiType = type
         inferenceMode = InferenceMode.API
-        messages += ChatMessage("已切换到 ${type.name} API 模式", MessageType.SYSTEM)
+        connectionState = ConnectionState.Online
+        appendEval("已切换到 ${type.name} API 模式")
+        loadedModelName = type.name
     }
 
     fun updateHeteroServerUrl(url: String) {
         heteroServerUrl = url.trim().ifEmpty { LLamaAndroid.DEFAULT_HETERO_SERVER_URL }
         llamaAndroid.setHeteroServerUrl(heteroServerUrl)
-        messages += ChatMessage("HeteroSpec服务地址：$heteroServerUrl", MessageType.SYSTEM)
+        appendEval("HeteroSpec服务地址：$heteroServerUrl")
+        if (inferenceMode == InferenceMode.HETERO) {
+            viewModelScope.launch { pingHealthz() }
+        }
     }
 
     fun updateHeteroDraftStrategy(strategy: String) {
@@ -383,10 +446,9 @@ class MainViewModel(
     }
 
     fun addImageMessage(bitmap: Bitmap) {
-        messages += ChatMessage("", MessageType.USER, bitmap)
+        messages += ChatMessage.report("", bitmap)
     }
 
-    // 添加OCR编辑相关方法
     fun showOcrEditor(text: String, image: Bitmap) {
         ocrEditText = text
         ocrSourceImage = image
@@ -404,26 +466,34 @@ class MainViewModel(
     }
 
     fun confirmOcrAndSend() {
+        if (!canSend) {
+            errorBanner = "请先到设置里选择模型"
+            hideOcrEditor()
+            return
+        }
         val ocrMessage = "请解读病例报告并给出简短建议：$ocrEditText"
-
-        messages += ChatMessage(ocrMessage, MessageType.USER)
-
+        val reportIndex = messages.indexOfLast { it.kind == MessageKind.Report }
+        if (reportIndex >= 0) {
+            val old = messages[reportIndex]
+            messages = messages.toMutableList().also {
+                it[reportIndex] = old.copy(content = ocrEditText)
+            }
+        } else {
+            messages += ChatMessage.report(ocrEditText)
+        }
         message = ocrMessage
-
         hideOcrEditor()
-
         send(skipAddingUserMessage = true)
         message = ""
     }
 
-    // 添加消息编辑相关方法
-    fun startEditingMessage(index: Int, content: String) {
-        editingMessageIndex = index
+    fun startEditingMessage(id: String, content: String) {
+        editingMessageId = id
         editingText = content
     }
 
     fun cancelEditingMessage() {
-        editingMessageIndex = -1
+        editingMessageId = null
         editingText = ""
     }
 
@@ -432,19 +502,15 @@ class MainViewModel(
     }
 
     fun confirmEditMessage() {
-        if (editingMessageIndex >= 0 && editingText.isNotBlank()) {
-            // 添加新的用户消息，而不是覆盖原消息
-            messages += ChatMessage(editingText, MessageType.USER)
-
-            // 发送编辑后的消息
-            message = editingText
+        val text = editingText
+        if (editingMessageId != null && text.isNotBlank()) {
+            messages += ChatMessage.report(text)
+            message = text
             cancelEditingMessage()
             send(skipAddingUserMessage = true)
             message = ""
         }
     }
-
-    // ===== 测试模式：整体速度统计 =====
 
     fun startTest(totalItems: Int, strategyLabel: String? = null) {
         isTestRunning = true
@@ -455,21 +521,19 @@ class MainViewModel(
         testTotalTokens = 0
         testStartTimeMs = System.currentTimeMillis()
         testActiveTimeMs = 0L
-        // 重置数据集级别 CPU 采样
+        lastDatasetSpeedUiAt = 0L
         datasetCpuSampleSum = 0.0f
         datasetCpuSampleCount = 0
         datasetCpuAvg = 0.0f
-        // 清零展示值，后续由采样回调实时更新数据集平均
         cpuUsage = 0.0f
         val extra = if (strategyLabel.isNullOrEmpty()) "" else "，策略=$strategyLabel"
-        messages += ChatMessage("开始数据集测试，共 $totalItems 条$extra", MessageType.SYSTEM)
+        appendEval("开始数据集测试，共 $totalItems 条$extra")
     }
 
     private fun updateTestTokens(tokens: Int) {
         if (!isTestRunning) return
         if (tokens <= 0) return
         testTotalTokens += tokens
-        // 速度计算改为在 sendForTest 内依据“活跃生成时长”更新
     }
 
     fun incrementTestProgress() {
@@ -484,100 +548,11 @@ class MainViewModel(
         datasetSpeed = lastTestSpeed
         isTestRunning = false
         val extra = if (strategyLabel.isNullOrEmpty()) "" else "，策略=$strategyLabel"
-        messages += ChatMessage(
-            "测试完成：$testProcessed/$testTotal$extra，整体速度：${"%.2f".format(lastTestSpeed)} tokens/s",
-            MessageType.SYSTEM
+        appendEval(
+            "测试完成：$testProcessed/$testTotal$extra，整体速度：${"%.2f".format(lastTestSpeed)} tokens/s"
         )
     }
 
-    // 仅用于测试模式：不向聊天消息区输出，直接进行推理并累计整体 tokens
-    suspend fun sendForTest(text: String) {
-        try {
-            var itemFirstTokenTimeMs: Long? = null
-            var itemLastTokenTimeMs: Long? = null
-            val fullPrompt = when (promptMode) {
-                PromptMode.QWEN2 -> {
-                    "You are Qwen, created by Alibaba Cloud. You are a helpful assistant.\n\nUser: $text\n\nAssistant:"
-                }
-                PromptMode.QWEN3 -> {
-                    "You are Qwen, created by Alibaba Cloud. You are a helpful assistant.\n\nUser: $text\n\nAssistant:\n<think></think>"
-                }
-                PromptMode.DEEPSEEk -> text
-            }
-
-            when (inferenceMode) {
-                InferenceMode.LOCAL -> {
-                    llamaAndroid.send(fullPrompt)
-                        .catch {
-                            Log.e(tag, "sendForTest() failed", it)
-                        }
-                        .collect { (_, tokens) ->
-                            val now = System.currentTimeMillis()
-                            if (tokens > 0) {
-                                if (itemFirstTokenTimeMs == null) itemFirstTokenTimeMs = now
-                                itemLastTokenTimeMs = now
-                            }
-                            updateTestTokens(tokens)
-                            // 实时速度：累计活跃时长 + 当前样本已用时
-                            val partialActive = if (itemFirstTokenTimeMs != null && itemLastTokenTimeMs != null) (itemLastTokenTimeMs!! - itemFirstTokenTimeMs!!) else 0L
-                            val totalActive = testActiveTimeMs + partialActive
-                            if (totalActive > 0L) {
-                                datasetSpeed = testTotalTokens / (totalActive / 1000.0)
-                            }
-                        }
-                }
-                InferenceMode.API -> {
-                    apiService.send(fullPrompt)
-                        .catch {
-                            Log.e(tag, "API sendForTest() failed", it)
-                        }
-                        .collect { (_, tokens) ->
-                            val now = System.currentTimeMillis()
-                            if (tokens > 0) {
-                                if (itemFirstTokenTimeMs == null) itemFirstTokenTimeMs = now
-                                itemLastTokenTimeMs = now
-                            }
-                            updateTestTokens(tokens)
-                            val partialActive = if (itemFirstTokenTimeMs != null && itemLastTokenTimeMs != null) (itemLastTokenTimeMs!! - itemFirstTokenTimeMs!!) else 0L
-                            val totalActive = testActiveTimeMs + partialActive
-                            if (totalActive > 0L) {
-                                datasetSpeed = testTotalTokens / (totalActive / 1000.0)
-                            }
-                        }
-                }
-                InferenceMode.HETERO -> {
-                    llamaAndroid.sendHetero(fullPrompt, serverUrl = heteroServerUrl)
-                        .catch {
-                            Log.e(tag, "sendForTest() failed", it)
-                        }
-                        .collect { (_, tokens) ->
-                            val now = System.currentTimeMillis()
-                            if (tokens > 0) {
-                                if (itemFirstTokenTimeMs == null) itemFirstTokenTimeMs = now
-                                itemLastTokenTimeMs = now
-                            }
-                            updateTestTokens(tokens)
-                            val partialActive = if (itemFirstTokenTimeMs != null && itemLastTokenTimeMs != null) (itemLastTokenTimeMs!! - itemFirstTokenTimeMs!!) else 0L
-                            val totalActive = testActiveTimeMs + partialActive
-                            if (totalActive > 0L) {
-                                datasetSpeed = testTotalTokens / (totalActive / 1000.0)
-                            }
-                        }
-                }
-            }
-        } catch (e: Exception) {
-            Log.e(tag, "Error during sendForTest", e)
-            messages += ChatMessage("测试失败：${e.message}", MessageType.SYSTEM)
-        } finally {
-            // 样本完成后，累计该样本活跃生成时长
-            // 注意：sendForTest() 每次只处理一个样本
-            // 若没有 token 产出，视作 0 时长
-            // itemFirstTokenTimeMs 与 itemLastTokenTimeMs 在 collect 中定义
-            // 为了访问它们，将 finally 中移动到 lambda 外定义
-        }
-    }
-
-    // 将样本活跃时长累加（供 sendForTest finally 调用）
     private fun accumulateItemActiveDuration(itemFirstTokenTimeMs: Long?, itemLastTokenTimeMs: Long?) {
         if (itemFirstTokenTimeMs != null && itemLastTokenTimeMs != null && itemLastTokenTimeMs >= itemFirstTokenTimeMs) {
             testActiveTimeMs += (itemLastTokenTimeMs - itemFirstTokenTimeMs)
@@ -586,80 +561,74 @@ class MainViewModel(
         datasetSpeed = if (activeSeconds > 0) testTotalTokens / activeSeconds else 0.0
     }
 
-    suspend fun sendForTest(text: String, _internalMarker: Boolean = false) {
-        // 占位避免重载冲突
+    suspend fun sendForTest(text: String) {
+        sendForTest_impl(text)
     }
 
-    // 由于 Kotlin 的工具编辑上下文限制，重新定义 sendForTest 的主体以包含 finally 中的累加逻辑
     suspend fun sendForTest_impl(text: String) {
         beginInferenceMonitoring()
         var itemFirstTokenTimeMs: Long? = null
         var itemLastTokenTimeMs: Long? = null
         try {
-            val fullPrompt = when (promptMode) {
-                PromptMode.QWEN2 -> {
-                    "You are Qwen, created by Alibaba Cloud. You are a helpful assistant.\n\nUser: $text\n\nAssistant:"
-                }
-                PromptMode.QWEN3 -> {
-                    "You are Qwen, created by Alibaba Cloud. You are a helpful assistant.\n\nUser: $text\n\nAssistant:\n<think></think>"
-                }
-                PromptMode.DEEPSEEk -> text
+            val fullPrompt = buildPrompt(text)
+            val flow = when (inferenceMode) {
+                InferenceMode.LOCAL -> llamaAndroid.send(fullPrompt)
+                InferenceMode.API -> apiService.send(fullPrompt)
+                InferenceMode.HETERO -> llamaAndroid.sendHetero(fullPrompt, serverUrl = heteroServerUrl)
             }
-
-            when (inferenceMode) {
-                InferenceMode.LOCAL -> {
-                    llamaAndroid.send(fullPrompt)
-                        .catch { Log.e(tag, "sendForTest() failed", it) }
-                        .collect { (_, tokens) ->
-                            val now = System.currentTimeMillis()
-                            if (tokens > 0) {
-                                if (itemFirstTokenTimeMs == null) itemFirstTokenTimeMs = now
-                                itemLastTokenTimeMs = now
-                            }
-                            updateTestTokens(tokens)
-                            val partialActive = if (itemFirstTokenTimeMs != null && itemLastTokenTimeMs != null) (itemLastTokenTimeMs!! - itemFirstTokenTimeMs!!) else 0L
-                            val totalActive = testActiveTimeMs + partialActive
-                            if (totalActive > 0L) datasetSpeed = testTotalTokens / (totalActive / 1000.0)
-                        }
+            flow.catch { Log.e(tag, "sendForTest() failed", it) }
+                .collect { (_, tokens) ->
+                    val now = System.currentTimeMillis()
+                    if (tokens > 0) {
+                        if (itemFirstTokenTimeMs == null) itemFirstTokenTimeMs = now
+                        itemLastTokenTimeMs = now
+                    }
+                    updateTestTokens(tokens)
+                    val partialActive = if (itemFirstTokenTimeMs != null && itemLastTokenTimeMs != null) {
+                        itemLastTokenTimeMs!! - itemFirstTokenTimeMs!!
+                    } else {
+                        0L
+                    }
+                    val totalActive = testActiveTimeMs + partialActive
+                    if (totalActive > 0L && now - lastDatasetSpeedUiAt >= 200L) {
+                        lastDatasetSpeedUiAt = now
+                        datasetSpeed = testTotalTokens / (totalActive / 1000.0)
+                    }
                 }
-                InferenceMode.API -> {
-                    apiService.send(fullPrompt)
-                        .catch { Log.e(tag, "API sendForTest() failed", it) }
-                        .collect { (_, tokens) ->
-                            val now = System.currentTimeMillis()
-                            if (tokens > 0) {
-                                if (itemFirstTokenTimeMs == null) itemFirstTokenTimeMs = now
-                                itemLastTokenTimeMs = now
-                            }
-                            updateTestTokens(tokens)
-                            val partialActive = if (itemFirstTokenTimeMs != null && itemLastTokenTimeMs != null) (itemLastTokenTimeMs!! - itemFirstTokenTimeMs!!) else 0L
-                            val totalActive = testActiveTimeMs + partialActive
-                            if (totalActive > 0L) datasetSpeed = testTotalTokens / (totalActive / 1000.0)
-                        }
-                }
-                InferenceMode.HETERO -> {
-                    llamaAndroid.sendHetero(fullPrompt, serverUrl = heteroServerUrl)
-                        .catch { Log.e(tag, "sendForTest() failed", it) }
-                        .collect { (_, tokens) ->
-                            val now = System.currentTimeMillis()
-                            if (tokens > 0) {
-                                if (itemFirstTokenTimeMs == null) itemFirstTokenTimeMs = now
-                                itemLastTokenTimeMs = now
-                            }
-                            updateTestTokens(tokens)
-                            val partialActive = if (itemFirstTokenTimeMs != null && itemLastTokenTimeMs != null) (itemLastTokenTimeMs!! - itemFirstTokenTimeMs!!) else 0L
-                            val totalActive = testActiveTimeMs + partialActive
-                            if (totalActive > 0L) datasetSpeed = testTotalTokens / (totalActive / 1000.0)
-                        }
-                }
-            }
         } catch (e: Exception) {
             Log.e(tag, "Error during sendForTest", e)
-            messages += ChatMessage("测试失败：${e.message}", MessageType.SYSTEM)
+            appendEval("测试失败：${e.message}")
         } finally {
             accumulateItemActiveDuration(itemFirstTokenTimeMs, itemLastTokenTimeMs)
             incrementTestProgress()
             endInferenceMonitoring()
+        }
+    }
+
+    private suspend fun pingHealthz() {
+        val url = healthzUrlFromWs(heteroServerUrl)
+        if (url.isEmpty()) {
+            connectionState = ConnectionState.Unknown
+            return
+        }
+        try {
+            val body = withContext(Dispatchers.IO) {
+                val request = Request.Builder().url(url).get().build()
+                httpClient.newCall(request).execute().use { response ->
+                    if (!response.isSuccessful) {
+                        throw IOException("HTTP ${response.code}")
+                    }
+                    response.body?.string().orEmpty()
+                }
+            }
+            healthJson = body
+            val json = JSONObject(body)
+            gpuQueueDepth = json.optInt("gpu_queue_depth", -1).takeIf { it >= 0 }
+            connectionState = ConnectionState.Online
+        } catch (e: Exception) {
+            connectionState = ConnectionState.Offline
+            healthJson = e.message ?: "offline"
+            gpuQueueDepth = null
         }
     }
 }

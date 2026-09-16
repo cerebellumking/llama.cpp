@@ -27,42 +27,33 @@ class CpuMonitor {
     private var monitoringRunnable: Runnable? = null
 
     private var onCpuUsageUpdate: ((Float) -> Unit)? = null
+    private val workerThread = android.os.HandlerThread("cpu-monitor").apply { start() }
+    private val workerHandler = Handler(workerThread.looper)
+    private var loggedMissingProcStat = false
 
     /**
      * 开始监控CPU使用率
      * @param intervalMs 监控间隔时间（毫秒）
      * @param callback CPU使用率更新回调，参数为CPU使用率百分比（0.0-100.0）
      */
-    fun startMonitoring(intervalMs: Long = 100, callback: (Float) -> Unit) {
+    fun startMonitoring(intervalMs: Long = 500, callback: (Float) -> Unit) {
         if (isMonitoring) {
             stopMonitoring()
         }
 
         onCpuUsageUpdate = callback
         isMonitoring = true
-
-        // 初始读取一次系统 CPU 统计，建立基准值
-        readSystemCpuStat().let { (total, idle) ->
-            if (total > 0L) {
-                lastTotalCpuTicks = total
-                lastIdleCpuTicks = idle
-                hasCpuBaseline = true
-            } else {
-                hasCpuBaseline = false
-            }
-        }
+        hasCpuBaseline = false
 
         monitoringRunnable = object : Runnable {
             override fun run() {
-                if (isMonitoring) {
-                    val cpuUsage = calculateSystemCpuUsage()
-                    onCpuUsageUpdate?.invoke(cpuUsage)
-                    handler.postDelayed(this, intervalMs)
-                }
+                if (!isMonitoring) return
+                val cpuUsage = calculateSystemCpuUsage()
+                handler.post { onCpuUsageUpdate?.invoke(cpuUsage) }
+                workerHandler.postDelayed(this, intervalMs)
             }
         }
-
-        handler.postDelayed(monitoringRunnable!!, intervalMs)
+        workerHandler.post(monitoringRunnable!!)
     }
 
     /**
@@ -70,7 +61,10 @@ class CpuMonitor {
      */
     fun stopMonitoring() {
         isMonitoring = false
-        monitoringRunnable?.let { handler.removeCallbacks(it) }
+        monitoringRunnable?.let {
+            workerHandler.removeCallbacks(it)
+            handler.removeCallbacks(it)
+        }
         monitoringRunnable = null
         onCpuUsageUpdate = null
     }
@@ -97,18 +91,14 @@ class CpuMonitor {
 
             if (totalDiff > 0L) {
                 val usage = (totalDiff - idleDiff).toFloat() / totalDiff.toFloat() * 100f
-                Log.d("CpuMonitor", "System CPU Usage: $usage% (totalDiff=$totalDiff idleDiff=$idleDiff)")
                 return usage.coerceIn(0f, 100f)
             }
         }
 
-        // /proc/stat 不可用或计算无效，尝试使用 top 输出作为回退
-        readCpuFromTop()?.let { return it }
-
-        // 若 top 也不可用，最后回退到根据各核频率估算
-        readCpuFromFrequencies()?.let { return it }
-
-        Log.w("CpuMonitor", "Fallback to 0% CPU (no /proc/stat and top not available)")
+        if (!loggedMissingProcStat) {
+            loggedMissingProcStat = true
+            Log.w("CpuMonitor", "Fallback to 0% CPU (no /proc/stat)")
+        }
         return 0.0f
     }
 

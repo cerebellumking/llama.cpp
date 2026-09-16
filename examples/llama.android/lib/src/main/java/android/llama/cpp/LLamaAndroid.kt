@@ -4,6 +4,8 @@ import android.util.Log
 import androidx.annotation.Keep
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
@@ -176,6 +178,7 @@ class LLamaAndroid {
                 try {
                     var curTokens = ncur.value
                     while (ncur.value <= promptLen + nlen) {
+                        currentCoroutineContext().ensureActive()
                         val str = heterospec_loop(state.context, promptLen + nlen, ncur)
                         if (str == null) {
                             break
@@ -208,16 +211,20 @@ class LLamaAndroid {
                 val ncur = IntVar(completion_init(state.context, state.batch, message, formatChat, nlen))
                 var totalTokens = 0
                 var curTokens = ncur.value
-                while (ncur.value <= nlen) {
-                    val str = completion_loop(state.context, state.batch, state.sampler, nlen, ncur)
-                    if (str == null) {
-                        break
+                try {
+                    while (ncur.value <= nlen) {
+                        currentCoroutineContext().ensureActive()
+                        val str = completion_loop(state.context, state.batch, state.sampler, nlen, ncur)
+                        if (str == null) {
+                            break
+                        }
+                        totalTokens = ncur.value - curTokens
+                        curTokens = ncur.value
+                        emit(Pair(str, totalTokens))
                     }
-                    totalTokens = ncur.value - curTokens
-                    curTokens = ncur.value
-                    emit(Pair(str, totalTokens))
+                } finally {
+                    kv_cache_clear(state.context)
                 }
-                kv_cache_clear(state.context)
             }
             else -> {}
         }
