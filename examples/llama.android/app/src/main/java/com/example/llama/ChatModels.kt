@@ -26,6 +26,8 @@ enum class PromptMode {
     QWEN2,
     DEEPSEEk,
     QWEN3,
+    QWEN35,
+    MINICPM5,
 }
 
 enum class ConnectionState {
@@ -66,9 +68,21 @@ fun promptModeForModel(modelName: String): PromptMode = when {
     modelName.contains("DeepSeek API") -> PromptMode.DEEPSEEk
     modelName.contains("Qwen2.5") -> PromptMode.QWEN2
     modelName.contains("DeepSeek-R1-DRAFT") -> PromptMode.QWEN2
+    modelName.contains("MiniCPM5") -> PromptMode.MINICPM5
+    modelName.contains("Qwen3.5") || modelName.contains("Qwen3.8") -> PromptMode.QWEN35
     modelName.contains("Qwen3") -> PromptMode.QWEN3
     else -> PromptMode.QWEN2
 }
+
+fun usesSpecialChatTokens(promptMode: PromptMode): Boolean =
+    promptMode == PromptMode.QWEN35 || promptMode == PromptMode.MINICPM5
+
+fun heteroIcnTarget(modelName: String): String = when {
+    modelName.contains("Qwen3.5") || modelName.contains("Qwen3.8") -> "Qwen3.8-27B"
+    else -> "qwen3-4b"
+}
+
+fun heteroIcnTokenizer(modelName: String): String = "${heteroIcnTarget(modelName)}-tokenizer"
 
 fun healthzUrlFromWs(wsUrl: String): String {
     val trimmed = wsUrl.trim()

@@ -14,6 +14,7 @@
 #include <math.h>
 #include <memory>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <unistd.h>
 #include <openssl/sha.h>
@@ -146,9 +147,13 @@ extern "C"
 JNIEXPORT jlong JNICALL
 Java_android_llama_cpp_LLamaAndroid_load_1model(JNIEnv *env, jobject, jstring filename) {
     llama_model_params model_params = llama_model_default_params();
+    // Kotlin rejects truncated GGUFs before this call. mmap + extra_bufts keeps
+    // KleidiAI CPU_REPACK. Never load CLIP/mmproj on this path (text-only).
+    model_params.use_mmap = true;
+    model_params.use_extra_bufts = true;
 
     auto path_to_model = env->GetStringUTFChars(filename, 0);
-    LOGi("Loading model from %s", path_to_model);
+    LOGi("Loading model from %s (mmap=1 extra_bufts=1 text-only)", path_to_model);
 
     auto model = llama_model_load_from_file(path_to_model, model_params);
     env->ReleaseStringUTFChars(filename, path_to_model);
@@ -179,11 +184,18 @@ Java_android_llama_cpp_LLamaAndroid_new_1context(JNIEnv *env, jobject, jlong jmo
         return 0;
     }
 
+    char desc[160] = {0};
+    llama_model_desc(model, desc, sizeof(desc));
+    const bool hybrid = llama_model_is_hybrid(model) || llama_model_is_recurrent(model);
+    const llama_vocab * vocab = llama_model_get_vocab(model);
+    const int n_vocab = vocab ? llama_vocab_n_tokens(vocab) : 0;
+    const int nextn = llama_model_n_layer_nextn(model);
+
     int nproc = (int) sysconf(_SC_NPROCESSORS_ONLN);
     int n_threads = heterospec_hotpath::decode_thread_count(nproc);
     const auto pinned = heterospec_hotpath::big_core_ids(nproc, n_threads);
     const bool pinned_ok = heterospec_hotpath::pin_to_cpus(pinned);
-    LOGi("Using %d threads (nproc=%d pin=%d kleidiai=%d)",
+    LOGi("Using %d threads (nproc=%d pin=%d kleidiai=%d hybrid=%d nextn=%d text-only)",
             n_threads,
             nproc,
             pinned_ok ? 1 : 0,
@@ -192,19 +204,53 @@ Java_android_llama_cpp_LLamaAndroid_new_1context(JNIEnv *env, jobject, jlong jmo
 #else
             0
 #endif
-    );
+            ,
+            hybrid ? 1 : 0,
+            nextn);
 
     llama_context_params ctx_params = llama_context_default_params();
 
+    // n_outputs_max defaults to n_batch. 1536 * Qwen3.5 vocab (248320) * 4B ≈ 1.5 GiB
+    // just for logits, which LMK-kills the process when switching onto 3.5-0.8B.
+    // Hybrid Qwen3.5: 6 threads on the biggest cores, n_ctx=3072, KleidiAI.
+    // Flash-attn only touches the 6 full-attn layers; GDN is unchanged.
     ctx_params.n_ctx           = 3072;
     ctx_params.n_threads       = n_threads;
     ctx_params.n_threads_batch = n_threads;
-    ctx_params.n_batch         = 1536;  // 增加批处理大小
+    ctx_params.n_batch         = hybrid ? 512 : 1536;
+    ctx_params.n_ubatch        = hybrid ? 128 : 512;
+    ctx_params.n_outputs_max   = 8;
+    ctx_params.embeddings      = false;
+    ctx_params.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_AUTO;
 
-    llama_context * context = llama_init_from_model(model, ctx_params);
+    LOGi("new_context desc=%s hybrid=%d n_vocab=%d n_ctx=%u n_batch=%u n_ubatch=%u n_outputs_max=%u fa=auto",
+            desc,
+            hybrid ? 1 : 0,
+            n_vocab,
+            ctx_params.n_ctx,
+            ctx_params.n_batch,
+            ctx_params.n_ubatch,
+            ctx_params.n_outputs_max);
+
+    auto try_init = [&](llama_context_params params) -> llama_context * {
+        try {
+            return llama_init_from_model(model, params);
+        } catch (const std::exception & e) {
+            LOGe("llama_init_from_model threw: %s", e.what());
+            return nullptr;
+        }
+    };
+
+    llama_context * context = try_init(ctx_params);
+    if (!context) {
+        LOGe("new_context auto flash-attn failed, retry disabled");
+        ctx_params.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_DISABLED;
+        context = try_init(ctx_params);
+    }
 
     if (!context) {
-        LOGe("llama_new_context_with_model() returned null)");
+        LOGe("llama_new_context_with_model() returned null desc=%s hybrid=%d n_vocab=%d",
+                desc, hybrid ? 1 : 0, n_vocab);
         env->ThrowNew(env->FindClass("java/lang/IllegalStateException"),
                       "llama_new_context_with_model() returned null)");
         return 0;
@@ -543,6 +589,8 @@ struct CloudState {
     std::vector<double> draft_times;
 
     DraftStrategy draft_strategy = DraftStrategy::Fixed3;
+    std::string target_model = "qwen3-4b";
+    std::string tokenizer_id = "qwen3-4b-tokenizer";
     bool use_queue_in_goodput = false;
     bool exclude_next_round_as_ttft = true;
     int adaptive_n_draft = 3;
@@ -790,13 +838,29 @@ static std::string icn_multi_url_quote(const std::string& value) {
     return out.str();
 }
 
+static std::string jstring_to_utf8(JNIEnv *env, jstring value) {
+    if (value == nullptr) {
+        return "";
+    }
+    const char *chars = env->GetStringUTFChars(value, nullptr);
+    if (chars == nullptr) {
+        return "";
+    }
+    std::string out(chars);
+    env->ReleaseStringUTFChars(value, chars);
+    return out;
+}
+
 static std::string icn_multi_build_icn_name_v2(
+        const CloudState& state,
         const llama_tokens& prefix_tokens,
         const llama_tokens& draft_tokens,
         int speculative_len) {
-    const std::string target_model = "qwen3-4b";
+    const std::string target_model = state.target_model.empty() ? "qwen3-4b" : state.target_model;
     const std::string draft_model = "android-local-draft";
-    const std::string tokenizer_id = "qwen3-4b-tokenizer";
+    const std::string tokenizer_id = state.tokenizer_id.empty()
+            ? (target_model + "-tokenizer")
+            : state.tokenizer_id;
     const std::string sampling_config = "{\"temperature\":0,\"top_k\":1}";
     const std::string policy = "observe_only";
 
@@ -1423,7 +1487,9 @@ Java_android_llama_cpp_LLamaAndroid_heterospec_1init(
         jint n_len,
         jstring server_url,
         jstring draft_strategy,
-        jboolean use_queue_in_goodput)
+        jboolean use_queue_in_goodput,
+        jstring target_model,
+        jstring tokenizer_id)
 {
     cached_token_chars.clear();
     const auto text = env->GetStringUTFChars(jtext, 0);
@@ -1447,9 +1513,19 @@ Java_android_llama_cpp_LLamaAndroid_heterospec_1init(
     state->server_url = url ? url : "";
     state->draft_strategy = parse_draft_strategy(strategy_cstr);
     state->use_queue_in_goodput = (use_queue_in_goodput == JNI_TRUE);
-    LOGi("hetero_config draft_strategy=%s use_queue_in_goodput=%d",
+    state->target_model = jstring_to_utf8(env, target_model);
+    if (state->target_model.empty()) {
+        state->target_model = "qwen3-4b";
+    }
+    state->tokenizer_id = jstring_to_utf8(env, tokenizer_id);
+    if (state->tokenizer_id.empty()) {
+        state->tokenizer_id = state->target_model + "-tokenizer";
+    }
+    LOGi("hetero_config draft_strategy=%s use_queue_in_goodput=%d target=%s tokenizer=%s",
             draft_strategy_name(state->draft_strategy),
-            state->use_queue_in_goodput ? 1 : 0);
+            state->use_queue_in_goodput ? 1 : 0,
+            state->target_model.c_str(),
+            state->tokenizer_id.c_str());
     if (strategy_cstr != nullptr) {
         env->ReleaseStringUTFChars(draft_strategy, strategy_cstr);
         strategy_cstr = nullptr;
@@ -1638,7 +1714,8 @@ Java_android_llama_cpp_LLamaAndroid_heterospec_1loop(
             binary_msg.size(),
             websocketpp::frame::opcode::binary);
 
-        const std::string icn_multi_icn_name = icn_multi_build_icn_name_v2(prompt_tgt, draft_tokens, static_cast<int>(draft_tokens.size()));
+        const std::string icn_multi_icn_name = icn_multi_build_icn_name_v2(
+                *state, prompt_tgt, draft_tokens, static_cast<int>(draft_tokens.size()));
         LOGi("icn_multi_icn_name=%s", icn_multi_icn_name.c_str());
         LOGi("icn_multi_raw_conf=%s icn_multi_calibrated_p=%s",
                 icn_multi_join_floats(draft_confidences).c_str(),

@@ -10,6 +10,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.llama.api.ApiService
 import com.example.llama.api.ApiType
+import java.io.File
 import java.io.IOException
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CancellationException
@@ -259,9 +260,13 @@ class MainViewModel(
             try {
                 val fullPrompt = buildPrompt(text)
                 val flow = when (inferenceMode) {
-                    InferenceMode.LOCAL -> llamaAndroid.send(fullPrompt)
+                    InferenceMode.LOCAL -> llamaAndroid.send(fullPrompt, formatChat = usesSpecialChatTokens(promptMode))
                     InferenceMode.API -> apiService.send(fullPrompt)
-                    InferenceMode.HETERO -> llamaAndroid.sendHetero(fullPrompt, serverUrl = heteroServerUrl)
+                    InferenceMode.HETERO -> llamaAndroid.sendHetero(
+                        fullPrompt,
+                        formatChat = usesSpecialChatTokens(promptMode),
+                        serverUrl = heteroServerUrl,
+                    )
                 }
                 flow.catch { err ->
                     Log.e(tag, "send() failed", err)
@@ -329,6 +334,10 @@ class MainViewModel(
             "You are Qwen, created by Alibaba Cloud. You are a helpful assistant.\n\nUser: $text\n\nAssistant:"
         PromptMode.QWEN3 ->
             "You are Qwen, created by Alibaba Cloud. You are a helpful assistant.\n\nUser: $text\n\nAssistant:\n<think></think>"
+        PromptMode.QWEN35 ->
+            "<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.<|im_end|>\n<|im_start|>user\n$text<|im_end|>\n<|im_start|>assistant\n"
+        PromptMode.MINICPM5 ->
+            "<|im_start|>user\n$text<|im_end|>\n<|im_start|>assistant\n"
         PromptMode.DEEPSEEk -> text
     }
 
@@ -371,9 +380,31 @@ class MainViewModel(
         messages = next
     }
 
+    fun isSelectedModel(model: Downloadable): Boolean {
+        if (model.isApiModel) {
+            if (inferenceMode != InferenceMode.API) return false
+            return when (model.name) {
+                "DeepSeek API" -> currentApiType == ApiType.DEEPSEEK
+                else -> currentApiType == ApiType.QWEN
+            }
+        }
+        if (!isModelLoaded) return false
+        if (model.destination?.name != loadedModelName) return false
+        return model.isHetero == (inferenceMode == InferenceMode.HETERO)
+    }
+
     fun load(pathToModel: String, isHetero: Boolean = false) {
         viewModelScope.launch {
             try {
+                val file = File(pathToModel)
+                if (!file.isCompleteGguf(advertisedMinBytes(pathToModel, file.name))) {
+                    val size = if (file.exists()) file.length() else 0L
+                    appendEval("模型文件不完整（$size 字节），已删除，请重新下载")
+                    file.delete()
+                    isModelLoaded = false
+                    loadedModelName = null
+                    return@launch
+                }
                 inferenceMode = if (isHetero) InferenceMode.HETERO else InferenceMode.LOCAL
                 try {
                     llamaAndroid.unload()
@@ -384,17 +415,27 @@ class MainViewModel(
                 isModelLoaded = true
                 val fileName = pathToModel.substringAfterLast("/")
                 loadedModelName = fileName
+                promptMode = promptModeForModel(fileName)
                 if (isHetero) {
+                    llamaAndroid.setHeteroIcnIdentity(
+                        heteroIcnTarget(fileName),
+                        heteroIcnTokenizer(fileName),
+                    )
                     appendEval("使用草稿模型：$fileName")
+                    if (fileName.contains("Qwen3.5") || fileName.contains("Qwen3.8")) {
+                        appendEval("云端应对齐 Qwen3.8-27B（纯文本，不传图像）")
+                    }
                     pingHealthz()
                 } else {
                     appendEval("已切换到模型：$fileName")
                 }
-            } catch (exc: IllegalStateException) {
+            } catch (exc: CancellationException) {
+                throw exc
+            } catch (exc: Exception) {
                 Log.e(tag, "load() failed", exc)
                 isModelLoaded = false
                 loadedModelName = null
-                appendEval(exc.message ?: "load failed")
+                appendEval("加载失败：${exc.message ?: exc.javaClass.simpleName}。若刚中断过下载，请重新下载。")
             }
         }
     }
@@ -572,9 +613,13 @@ class MainViewModel(
         try {
             val fullPrompt = buildPrompt(text)
             val flow = when (inferenceMode) {
-                InferenceMode.LOCAL -> llamaAndroid.send(fullPrompt)
+                InferenceMode.LOCAL -> llamaAndroid.send(fullPrompt, formatChat = usesSpecialChatTokens(promptMode))
                 InferenceMode.API -> apiService.send(fullPrompt)
-                InferenceMode.HETERO -> llamaAndroid.sendHetero(fullPrompt, serverUrl = heteroServerUrl)
+                InferenceMode.HETERO -> llamaAndroid.sendHetero(
+                    fullPrompt,
+                    formatChat = usesSpecialChatTokens(promptMode),
+                    serverUrl = heteroServerUrl,
+                )
             }
             flow.catch { Log.e(tag, "sendForTest() failed", it) }
                 .collect { (_, tokens) ->
@@ -624,6 +669,21 @@ class MainViewModel(
             healthJson = body
             val json = JSONObject(body)
             gpuQueueDepth = json.optInt("gpu_queue_depth", -1).takeIf { it >= 0 }
+            val targetModel = json.optString("target_model").ifBlank { json.optString("model") }
+            val tokenizerId = json.optString("tokenizer_id")
+            if (targetModel.isNotBlank()) {
+                llamaAndroid.setHeteroIcnIdentity(
+                    targetModel,
+                    tokenizerId.ifBlank { "$targetModel-tokenizer" },
+                )
+            }
+            val loaded = loadedModelName.orEmpty()
+            if ((loaded.contains("Qwen3.5") || loaded.contains("Qwen3.8")) &&
+                !targetModel.contains("3.8") &&
+                !targetModel.contains("3.5")
+            ) {
+                appendEval("云端当前是 $targetModel，这个草稿需要 Qwen3.8-27B（248320 词表）")
+            }
             connectionState = ConnectionState.Online
         } catch (e: Exception) {
             connectionState = ConnectionState.Offline

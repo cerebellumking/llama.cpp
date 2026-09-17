@@ -256,6 +256,21 @@ fun defaultModels(extFilesDir: File?): List<Downloadable> = listOf(
         destination = File(extFilesDir, "Qwen3-0.6B-BF16.gguf"),
     ),
     Downloadable(
+        name = "Qwen3.5-0.8B (Q4_K_M, 0.5 GiB)",
+        source = Uri.parse("https://modelscope.cn/unsloth/Qwen3.5-0.8B-GGUF/resolve/main/Qwen3.5-0.8B-Q4_K_M.gguf?download=true"),
+        destination = File(extFilesDir, "Qwen3.5-0.8B-Q4_K_M.gguf"),
+    ),
+    Downloadable(
+        name = "Qwen3.5-0.8B (Q4_0, 0.5 GiB)",
+        source = Uri.parse("https://modelscope.cn/unsloth/Qwen3.5-0.8B-GGUF/resolve/main/Qwen3.5-0.8B-Q4_0.gguf?download=true"),
+        destination = File(extFilesDir, "Qwen3.5-0.8B-Q4_0.gguf"),
+    ),
+    Downloadable(
+        name = "MiniCPM5-1B (Q4_K_M, 0.6 GiB)",
+        source = Uri.parse("https://modelscope.cn/OpenBMB/MiniCPM5-1B-GGUF/resolve/main/MiniCPM5-1B-Q4_K_M.gguf?download=true"),
+        destination = File(extFilesDir, "MiniCPM5-1B-Q4_K_M.gguf"),
+    ),
+    Downloadable(
         name = "Qwen2.5-32B+Qwen2.5-0.5B_Q4_K_M",
         source = Uri.parse("https://modelscope.cn/alamios/DeepSeek-R1-DRAFT-Qwen2.5-0.5B-GGUF/resolve/main/DeepSeek-R1-DRAFT-Qwen2.5-0.5B-Q4_K_M.gguf?download=true"),
         destination = File(extFilesDir, "DeepSeek-R1-DRAFT-Qwen2.5-0.5B-Q4_K_M.gguf"),
@@ -277,6 +292,18 @@ fun defaultModels(extFilesDir: File?): List<Downloadable> = listOf(
         name = "Qwen3-32B+Qwen3-0.6B",
         source = Uri.parse("https://modelscope.cn/unsloth/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-BF16.gguf?download=true"),
         destination = File(extFilesDir, "Qwen3-0.6B-BF16.gguf"),
+        isHetero = true,
+    ),
+    Downloadable(
+        name = "Qwen3.8-27B+Qwen3.5-0.8B_Q4_K_M",
+        source = Uri.parse("https://modelscope.cn/unsloth/Qwen3.5-0.8B-GGUF/resolve/main/Qwen3.5-0.8B-Q4_K_M.gguf?download=true"),
+        destination = File(extFilesDir, "Qwen3.5-0.8B-Q4_K_M.gguf"),
+        isHetero = true,
+    ),
+    Downloadable(
+        name = "Qwen3.8-27B+Qwen3.5-0.8B_Q4_0",
+        source = Uri.parse("https://modelscope.cn/unsloth/Qwen3.5-0.8B-GGUF/resolve/main/Qwen3.5-0.8B-Q4_0.gguf?download=true"),
+        destination = File(extFilesDir, "Qwen3.5-0.8B-Q4_0.gguf"),
         isHetero = true,
     ),
 )

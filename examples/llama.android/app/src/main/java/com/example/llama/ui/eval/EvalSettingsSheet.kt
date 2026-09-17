@@ -2,6 +2,7 @@ package com.example.llama.ui.eval
 
 import android.app.DownloadManager
 import android.content.Context
+import android.content.SharedPreferences
 import android.llama.cpp.LLamaAndroid
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
@@ -36,6 +37,7 @@ import androidx.compose.ui.unit.dp
 import androidx.core.net.toUri
 import com.example.llama.Downloadable
 import com.example.llama.MainViewModel
+import com.example.llama.cancelDownloadsFor
 import com.example.llama.ocr.DualOcrController
 import com.example.llama.ocr.OcrBackend
 import com.example.llama.api.ApiType
@@ -59,7 +61,6 @@ fun EvalSettingsSheet(
         context.getSharedPreferences("heterospec_settings", Context.MODE_PRIVATE)
     }
     var heteroServerInput by remember { mutableStateOf(viewModel.heteroServerUrl) }
-    var currentModelName by remember { mutableStateOf(viewModel.loadedModelName ?: "") }
     var downloadingModel by remember { mutableStateOf<Downloadable?>(null) }
     var downloadProgress by remember { mutableDoubleStateOf(0.0) }
     var downloadId by remember { mutableLongStateOf(-1L) }
@@ -68,11 +69,50 @@ fun EvalSettingsSheet(
     val ocrActive by ocr.activeId.collectAsState()
     val ocrStatus by ocr.status.collectAsState()
 
+    LaunchedEffect(models) {
+        if (downloadId != -1L) return@LaunchedEffect
+        val savedId = preferences.getLong(Downloadable.PREF_MODEL_DL_ID, -1L)
+        val savedPath = preferences.getString(Downloadable.PREF_MODEL_DL_PATH, "").orEmpty()
+        if (savedId == -1L) return@LaunchedEffect
+        val model = models.firstOrNull { it.destination?.path == savedPath }
+        val cursor = dm.query(DownloadManager.Query().setFilterById(savedId))
+        val status = if (cursor != null && cursor.moveToFirst()) {
+            cursor.getInt(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS))
+        } else {
+            -1
+        }
+        cursor?.close()
+        when (status) {
+            DownloadManager.STATUS_RUNNING,
+            DownloadManager.STATUS_PENDING,
+            DownloadManager.STATUS_PAUSED -> {
+                downloadingModel = model
+                downloadId = savedId
+            }
+            DownloadManager.STATUS_SUCCESSFUL -> {
+                if (model != null && !model.isReady()) {
+                    model.destination?.delete()
+                    viewModel.log("上次下载未完成，已清理残缺文件，请重新下载")
+                }
+                clearDownloadPrefs(preferences)
+            }
+            else -> {
+                if (model != null && !model.isReady()) {
+                    model.destination?.delete()
+                }
+                clearDownloadPrefs(preferences)
+            }
+        }
+    }
+
     LaunchedEffect(downloadId) {
         if (downloadId == -1L) return@LaunchedEffect
         while (true) {
             val cursor = dm.query(DownloadManager.Query().setFilterById(downloadId))
             if (cursor != null && cursor.moveToFirst()) {
+                val status = cursor.getInt(
+                    cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS)
+                )
                 val bytesDownloaded = cursor.getLong(
                     cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_BYTES_DOWNLOADED_SO_FAR)
                 )
@@ -82,23 +122,93 @@ fun EvalSettingsSheet(
                 if (bytesTotal > 0) {
                     downloadProgress = bytesDownloaded.toDouble() / bytesTotal
                 }
-                if (bytesDownloaded == bytesTotal && bytesTotal > 0) {
-                    downloadingModel?.let { model ->
-                        viewModel.clear()
-                        viewModel.promptMode = promptModeForModel(model.name)
-                        viewModel.load(model.destination!!.path, model.isHetero)
-                        currentModelName = model.name
+                when (status) {
+                    DownloadManager.STATUS_SUCCESSFUL -> {
+                        cursor.close()
+                        val model = downloadingModel
+                        downloadingModel = null
+                        downloadId = -1L
+                        downloadProgress = 0.0
+                        clearDownloadPrefs(preferences)
+                        delay(300)
+                        if (model != null && model.isReady()) {
+                            viewModel.clear()
+                            viewModel.promptMode = promptModeForModel(model.name)
+                            viewModel.load(model.destination!!.path, model.isHetero)
+                        } else {
+                            model?.destination?.delete()
+                            viewModel.log("下载结束但文件不完整，请再点一次重新下载")
+                        }
+                        break
                     }
-                    downloadingModel = null
-                    downloadId = -1L
-                    downloadProgress = 0.0
-                    cursor.close()
-                    break
+                    DownloadManager.STATUS_FAILED -> {
+                        cursor.close()
+                        downloadingModel?.let { model ->
+                            if (!model.isReady()) {
+                                model.destination?.delete()
+                            }
+                        }
+                        viewModel.log("下载失败，请检查网络后重试")
+                        downloadingModel = null
+                        downloadId = -1L
+                        downloadProgress = 0.0
+                        clearDownloadPrefs(preferences)
+                        break
+                    }
                 }
+            } else {
+                cursor?.close()
+                downloadingModel = null
+                downloadId = -1L
+                downloadProgress = 0.0
+                clearDownloadPrefs(preferences)
+                break
             }
-            cursor?.close()
+            cursor.close()
             delay(1000)
         }
+    }
+
+    fun startOrResumeDownload(selected: Downloadable, hetero: Boolean) {
+        if (selected.isReady()) {
+            viewModel.clear()
+            viewModel.promptMode = promptModeForModel(selected.name)
+            viewModel.load(selected.destination!!.path, hetero)
+            return
+        }
+        val dest = selected.destination ?: return
+        val source = selected.source ?: return
+        if (downloadingModel != null) return
+        dm.cancelDownloadsFor(dest, source)
+        val staleId = preferences.getLong(Downloadable.PREF_MODEL_DL_ID, -1L)
+        if (staleId != -1L) {
+            dm.remove(staleId)
+        }
+        if (dest.exists()) {
+            viewModel.log("发现未下完的文件（${dest.length()} 字节），已删除，重新下载")
+            dest.delete()
+        }
+        dest.parentFile?.mkdirs()
+        val request = DownloadManager.Request(source)
+            .setTitle(selected.name)
+            .setDescription("正在下载模型...")
+            .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+            .setDestinationUri(dest.toUri())
+            .setAllowedNetworkTypes(
+                DownloadManager.Request.NETWORK_WIFI or DownloadManager.Request.NETWORK_MOBILE
+            )
+            .setAllowedOverMetered(true)
+            .setAllowedOverRoaming(true)
+        downloadId = dm.enqueue(request)
+        downloadingModel = selected
+        preferences.edit()
+            .putLong(Downloadable.PREF_MODEL_DL_ID, downloadId)
+            .putString(Downloadable.PREF_MODEL_DL_PATH, dest.path)
+            .putString(Downloadable.PREF_MODEL_DL_NAME, selected.name)
+            .apply()
+        viewModel.log(
+            if (hetero) "开始下载草稿模型：${selected.name}" else "开始下载模型：${selected.name}"
+        )
     }
 
     ModalBottomSheet(
@@ -170,7 +280,6 @@ fun EvalSettingsSheet(
                                 else -> ApiType.QWEN
                             }
                         )
-                        currentModelName = model.name
                     },
                 )
             }
@@ -180,24 +289,8 @@ fun EvalSettingsSheet(
                     model = model,
                     downloadingModel = downloadingModel,
                     downloadProgress = downloadProgress,
-                    currentModelName = currentModelName,
-                    onLoadOrDownload = { selected ->
-                        if (selected.destination?.exists() == true) {
-                            viewModel.clear()
-                            viewModel.promptMode = promptModeForModel(selected.name)
-                            viewModel.load(selected.destination.path)
-                            currentModelName = selected.name
-                        } else if (downloadingModel == null && selected.source != null) {
-                            val request = DownloadManager.Request(selected.source)
-                                .setTitle(selected.name)
-                                .setDescription("正在下载模型...")
-                                .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-                                .setDestinationUri(selected.destination!!.toUri())
-                            downloadId = dm.enqueue(request)
-                            downloadingModel = selected
-                            viewModel.log("开始下载模型：${selected.name}")
-                        }
-                    },
+                    isCurrent = viewModel.isSelectedModel(model),
+                    onLoadOrDownload = { startOrResumeDownload(it, hetero = false) },
                 )
             }
             ModelGroupHeader("云端协同")
@@ -206,24 +299,8 @@ fun EvalSettingsSheet(
                     model = model,
                     downloadingModel = downloadingModel,
                     downloadProgress = downloadProgress,
-                    currentModelName = currentModelName,
-                    onLoadOrDownload = { selected ->
-                        if (selected.destination?.exists() == true) {
-                            viewModel.clear()
-                            viewModel.promptMode = promptModeForModel(selected.name)
-                            viewModel.load(selected.destination.path, true)
-                            currentModelName = selected.name
-                        } else if (downloadingModel == null && selected.source != null) {
-                            val request = DownloadManager.Request(selected.source)
-                                .setTitle(selected.name)
-                                .setDescription("正在下载模型...")
-                                .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-                                .setDestinationUri(selected.destination!!.toUri())
-                            downloadId = dm.enqueue(request)
-                            downloadingModel = selected
-                            viewModel.log("开始下载草稿模型：${selected.name}")
-                        }
-                    },
+                    isCurrent = viewModel.isSelectedModel(model),
+                    onLoadOrDownload = { startOrResumeDownload(it, hetero = true) },
                 )
             }
             if (evalUnlocked) {
@@ -256,9 +333,10 @@ private fun ModelRow(
     model: Downloadable,
     downloadingModel: Downloadable?,
     downloadProgress: Double,
-    currentModelName: String,
+    isCurrent: Boolean,
     onLoadOrDownload: (Downloadable) -> Unit,
 ) {
+    val incomplete = model.destination?.exists() == true && !model.isReady()
     DropdownMenuItem(
         text = {
             Column {
@@ -271,12 +349,26 @@ private fun ModelRow(
                             .padding(top = 8.dp),
                     )
                     Text("${(downloadProgress * 100).toInt()}%", style = MaterialTheme.typography.labelSmall)
-                } else if (currentModelName == model.name) {
+                } else if (isCurrent) {
                     Text("当前", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+                } else if (incomplete) {
+                    Text(
+                        "未下完，点此重下",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
                 }
             }
         },
         onClick = { onLoadOrDownload(model) },
         enabled = downloadingModel == null || downloadingModel == model,
     )
+}
+
+private fun clearDownloadPrefs(preferences: SharedPreferences) {
+    preferences.edit()
+        .remove(Downloadable.PREF_MODEL_DL_ID)
+        .remove(Downloadable.PREF_MODEL_DL_PATH)
+        .remove(Downloadable.PREF_MODEL_DL_NAME)
+        .apply()
 }

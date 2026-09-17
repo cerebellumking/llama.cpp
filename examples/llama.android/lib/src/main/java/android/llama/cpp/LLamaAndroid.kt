@@ -44,6 +44,10 @@ class LLamaAndroid {
     @Volatile
     private var heteroServerUrl: String = DEFAULT_HETERO_SERVER_URL
     @Volatile
+    private var heteroTargetModel: String = DEFAULT_HETERO_TARGET_MODEL
+    @Volatile
+    private var heteroTokenizerId: String = DEFAULT_HETERO_TOKENIZER_ID
+    @Volatile
     private var draftStrategy: String = DRAFT_STRATEGY_FIXED3
     @Volatile
     private var useQueueInGoodput: Boolean = false
@@ -90,6 +94,8 @@ class LLamaAndroid {
         serverUrl: String,
         draftStrategy: String,
         useQueueInGoodput: Boolean,
+        targetModel: String,
+        tokenizerId: String,
     ): Int
 
     private external fun heterospec_cleanup()
@@ -134,6 +140,11 @@ class LLamaAndroid {
         heteroServerUrl = url.trim().ifEmpty { DEFAULT_HETERO_SERVER_URL }
     }
 
+    fun setHeteroIcnIdentity(targetModel: String, tokenizerId: String) {
+        heteroTargetModel = targetModel.trim().ifEmpty { DEFAULT_HETERO_TARGET_MODEL }
+        heteroTokenizerId = tokenizerId.trim().ifEmpty { "$heteroTargetModel-tokenizer" }
+    }
+
     fun setDraftStrategy(strategy: String) {
         draftStrategy = normalizeDraftStrategy(strategy)
     }
@@ -156,7 +167,7 @@ class LLamaAndroid {
         when (val state = threadLocalState.get()) {
             is State.Loaded -> {
                 val strategy = normalizeDraftStrategy(draftStrategy)
-                Log.i(tag, "sendHetero draft_strategy=$strategy use_queue_in_goodput=$useQueueInGoodput")
+                Log.i(tag, "sendHetero draft_strategy=$strategy use_queue_in_goodput=$useQueueInGoodput target=$heteroTargetModel tokenizer=$heteroTokenizerId")
                 val ncur = IntVar(
                     heterospec_init(
                         state.context,
@@ -167,6 +178,8 @@ class LLamaAndroid {
                         serverUrl.trim().ifEmpty { DEFAULT_HETERO_SERVER_URL },
                         strategy,
                         useQueueInGoodput,
+                        heteroTargetModel,
+                        heteroTokenizerId,
                     )
                 )
                 var promptLen = ncur.value
@@ -254,6 +267,8 @@ class LLamaAndroid {
 
     companion object {
         const val DEFAULT_HETERO_SERVER_URL = "ws://122.51.47.91:22776/ws/predict/binary/v3"
+        const val DEFAULT_HETERO_TARGET_MODEL = "qwen3-4b"
+        const val DEFAULT_HETERO_TOKENIZER_ID = "qwen3-4b-tokenizer"
         const val DRAFT_STRATEGY_FIXED3 = "fixed3"
         const val DRAFT_STRATEGY_ADAPTIVE = "adaptive"
 
