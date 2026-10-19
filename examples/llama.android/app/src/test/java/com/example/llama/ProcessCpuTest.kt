@@ -33,6 +33,44 @@ class ProcessCpuTest {
     fun oversubscribedProcess_clampsAt100() {
         assertEquals(100f, processCpuPercent(20_000, 1_000, 8)!!, 0.01f)
     }
+
+    @Test
+    fun procStat_usesIdlePlusIoWaitOverEightFields() {
+        val before = parseCpuStatLine("cpu  100 0 50 800 50 10 20 5")
+        val after = parseCpuStatLine("cpu  200 0 100 900 50 10 20 5 extra")
+        assertEquals(CpuStatSnapshot(1035, 850), before)
+        assertEquals(CpuStatSnapshot(1285, 950), after)
+        assertEquals(60f, systemCpuPercent(before!!, after!!)!!, 0.01f)
+    }
+
+    @Test
+    fun procStat_rejectsBlankAndNonCpuLines() {
+        assertNull(parseCpuStatLine("cpu0 1 2 3 4"))
+        assertNull(parseCpuStatLine(""))
+        assertNull(systemCpuPercent(CpuStatSnapshot(10, 1), CpuStatSnapshot(10, 1)))
+    }
+
+    @Test
+    fun frequencyFallback_weightsEachCoreByItsRange() {
+        val percent = frequencyCpuPercent(
+            listOf(
+                CoreClock(currentKhz = 1_000, minKhz = 0, maxKhz = 1_000),
+                CoreClock(currentKhz = 0, minKhz = 0, maxKhz = 2_000),
+                CoreClock(currentKhz = 500, minKhz = 0, maxKhz = 1_000),
+            ),
+        )
+        assertEquals(75f, percent!!, 0.01f)
+    }
+
+    @Test
+    fun meterMode_roundTripsStoredValue() {
+        assertEquals(CpuMeterMode.FREQUENCY, CpuMeterMode.fromStored(null))
+        assertEquals(CpuMeterMode.FREQUENCY, CpuMeterMode.fromStored("frequency"))
+        assertEquals(CpuMeterMode.AUTO, CpuMeterMode.fromStored("auto"))
+        assertEquals(CpuMeterMode.SYSTEM, CpuMeterMode.fromStored("system"))
+        assertEquals(CpuMeterMode.PROCESS, CpuMeterMode.fromStored("process"))
+        assertEquals("frequency", CpuMeterMode.FREQUENCY.stored())
+    }
 }
 
 class DatasetTestPlanTest {

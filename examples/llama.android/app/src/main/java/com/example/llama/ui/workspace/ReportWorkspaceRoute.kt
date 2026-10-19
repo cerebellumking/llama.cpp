@@ -18,6 +18,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import com.example.llama.CpuMeterMode
 import com.example.llama.Downloadable
 import com.example.llama.MainViewModel
 import com.example.llama.MessageKind
@@ -58,6 +59,9 @@ fun ReportWorkspaceRoute(
         if (!savedUrl.isNullOrBlank()) {
             viewModel.updateHeteroServerUrl(savedUrl)
         }
+        viewModel.updateCpuMeterMode(
+            CpuMeterMode.fromStored(preferences.getString("cpu_meter_mode", null)),
+        )
     }
 
     val onOpenSettings = remember { { showSettings = true } }

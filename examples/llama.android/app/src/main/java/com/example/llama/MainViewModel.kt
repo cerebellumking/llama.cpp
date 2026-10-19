@@ -2,7 +2,6 @@ package com.example.llama
 
 import android.graphics.Bitmap
 import android.llama.cpp.LLamaAndroid
-import android.os.Process
 import android.os.SystemClock
 import android.util.Log
 import androidx.compose.runtime.getValue
@@ -58,15 +57,26 @@ class MainViewModel(
     var hasProcessCpuSample by mutableStateOf(false)
         private set
 
+    var cpuMeterMode by mutableStateOf(CpuMeterMode.FREQUENCY)
+        private set
+
+    var cpuSourceLabel by mutableStateOf("")
+        private set
+
     var isInferenceRunning by mutableStateOf(false)
         private set
 
-    private var datasetCpuMs = 0L
-    private var datasetWallMs = 0L
+    private var meterNumer = 0L
+    private var meterDenom = 0L
+    private var meterSource: CpuSampleSource? = null
     var datasetCpuAvg by mutableStateOf(-1.0f)
         private set
     private val cpuCores = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
     private var testOwnsMonitor = false
+    private var loggedCpuFallback = false
+    private var shownCpuSum = 0.0
+    private var shownCpuCount = 0
+    private var holdShownCpu = false
 
     var inferenceMode by mutableStateOf(InferenceMode.LOCAL)
         private set
@@ -207,6 +217,8 @@ class MainViewModel(
         isCpuMonitorEnabled = enabled
         if (enabled) {
             testOwnsMonitor = false
+            resetShownCpu()
+            cpuUsage = -1.0f
             startProcessCpuMonitor()
         } else if (!isTestRunning) {
             cpuMonitor.stopMonitoring()
@@ -216,24 +228,102 @@ class MainViewModel(
         }
     }
 
+    fun updateCpuMeterMode(mode: CpuMeterMode) {
+        if (mode == cpuMeterMode) return
+        cpuMeterMode = mode
+        cpuMonitor.applyMode(mode)
+        loggedCpuFallback = false
+        meterNumer = 0L
+        meterDenom = 0L
+        meterSource = null
+        cpuSourceLabel = ""
+        resetShownCpu()
+        cpuUsage = -1.0f
+        if (isCpuMonitorEnabled || isTestRunning) {
+            startProcessCpuMonitor()
+        }
+    }
+
     private fun startProcessCpuMonitor() {
-        cpuMonitor.startMonitoring(500) { usage ->
-            if (isTestRunning) {
-                if (isInferenceRunning && kotlin.math.abs(cpuUsage - usage) >= 0.1f) {
-                    cpuUsage = usage
-                }
-                return@startMonitoring
-            }
-            if (!isInferenceRunning) return@startMonitoring
-            if (kotlin.math.abs(cpuUsage - usage) >= 0.1f || cpuUsage < 0f) {
-                cpuUsage = usage
+        cpuMonitor.startMonitoring(500) { reading ->
+            noteCpuReading(reading)
+            if (holdShownCpu) return@startMonitoring
+            if (isTestRunning && !isInferenceRunning) return@startMonitoring
+            addShownCpuSample(reading.percent)
+        }
+    }
+
+    private fun resetShownCpu() {
+        shownCpuSum = 0.0
+        shownCpuCount = 0
+        holdShownCpu = false
+    }
+
+    private fun shownCpuAverage(): Float? {
+        if (shownCpuCount == 0) return null
+        return (shownCpuSum / shownCpuCount).toFloat()
+    }
+
+    private fun addShownCpuSample(percent: Float) {
+        shownCpuSum += percent.toDouble()
+        shownCpuCount += 1
+        cpuUsage = shownCpuAverage() ?: percent
+    }
+
+    private fun noteCpuReading(reading: CpuReading) {
+        cpuSourceLabel = when (reading.source) {
+            CpuSampleSource.SYSTEM -> "整机"
+            CpuSampleSource.FREQUENCY -> "频率"
+            CpuSampleSource.PROCESS -> "进程"
+        }
+        if (reading.fellBack && !loggedCpuFallback) {
+            loggedCpuFallback = true
+            val how = if (reading.source == CpuSampleSource.FREQUENCY) "各核频率" else "本进程"
+            appendEval("这台机器读不到 /proc/stat，已改用$how")
+        }
+    }
+
+    private fun resetMeter() {
+        meterNumer = 0L
+        meterDenom = 0L
+        meterSource = null
+    }
+
+    private fun addMeterDelta(delta: CpuDelta) {
+        if (meterSource != null && meterSource != delta.source) {
+            resetMeter()
+        }
+        meterSource = delta.source
+        meterNumer += delta.numer
+        meterDenom += delta.denom
+        if (delta.fellBack) {
+            noteCpuReading(CpuReading(0f, delta.source, fellBack = true))
+        } else {
+            cpuSourceLabel = when (delta.source) {
+                CpuSampleSource.SYSTEM -> "整机"
+                CpuSampleSource.FREQUENCY -> "频率"
+                CpuSampleSource.PROCESS -> "进程"
             }
         }
+    }
+
+    private fun meterPercent(): Float? = when (meterSource) {
+        CpuSampleSource.SYSTEM -> {
+            if (meterDenom <= 0L) null
+            else (meterNumer.toFloat() / meterDenom.toFloat() * 100f).coerceIn(0f, 100f)
+        }
+        CpuSampleSource.FREQUENCY -> {
+            if (meterDenom <= 0L) null
+            else (meterNumer.toFloat() / meterDenom.toFloat()).coerceIn(0f, 100f)
+        }
+        CpuSampleSource.PROCESS -> processCpuPercent(meterNumer, meterDenom, cpuCores)
+        null -> null
     }
 
     private fun beginInferenceMonitoring() {
         isInferenceRunning = true
         if (!isTestRunning) {
+            resetShownCpu()
             hasProcessCpuSample = false
             cpuUsage = -1.0f
         }
@@ -241,6 +331,10 @@ class MainViewModel(
 
     private fun endInferenceMonitoring() {
         isInferenceRunning = false
+        if (!isTestRunning && shownCpuCount > 0) {
+            holdShownCpu = true
+            hasProcessCpuSample = true
+        }
     }
 
     fun send(skipAddingUserMessage: Boolean = false) {
@@ -676,8 +770,8 @@ class MainViewModel(
         lastDatasetSpeedUiAt = 0L
         testSkipped = 0
         testFailed = 0
-        datasetCpuMs = 0L
-        datasetWallMs = 0L
+        resetMeter()
+        resetShownCpu()
         datasetCpuAvg = -1.0f
         hasProcessCpuSample = false
         cpuUsage = -1.0f
@@ -712,10 +806,12 @@ class MainViewModel(
         lastTestSpeed = if (activeSeconds > 0) testTotalTokens / activeSeconds else 0.0
         datasetSpeed = lastTestSpeed
         isTestRunning = false
-        if (datasetWallMs > 0L) {
-            datasetCpuAvg = processCpuPercent(datasetCpuMs, datasetWallMs, cpuCores) ?: -1.0f
-            cpuUsage = datasetCpuAvg
-            hasProcessCpuSample = datasetCpuAvg >= 0f
+        val average = shownCpuAverage() ?: meterPercent()
+        if (average != null) {
+            datasetCpuAvg = average
+            cpuUsage = average
+            hasProcessCpuSample = true
+            holdShownCpu = true
         }
         if (testOwnsMonitor && !isCpuMonitorEnabled) {
             testOwnsMonitor = false
@@ -724,9 +820,15 @@ class MainViewModel(
         val extra = if (strategyLabel.isNullOrEmpty()) "" else "，策略=$strategyLabel"
         val skipped = if (testSkipped > 0) "，跳过 $testSkipped 条空识别" else ""
         val failed = if (testFailed > 0) "，失败 $testFailed 条" else ""
-        val cpuText = if (datasetWallMs > 0L && datasetCpuAvg >= 0f) {
-            val coresUsed = datasetCpuMs.toDouble() / datasetWallMs.toDouble()
-            "，进程 CPU ${"%.1f".format(datasetCpuAvg)}%（${"%.2f".format(coresUsed)}/$cpuCores 核）"
+        val cpuText = if (meterDenom > 0L && datasetCpuAvg >= 0f) {
+            if (meterSource == CpuSampleSource.SYSTEM) {
+                "，整机 CPU ${"%.1f".format(datasetCpuAvg)}%"
+            } else if (meterSource == CpuSampleSource.FREQUENCY) {
+                "，CPU ${"%.1f".format(datasetCpuAvg)}%（按频率）"
+            } else {
+                val coresUsed = meterNumer.toDouble() / meterDenom.toDouble()
+                "，进程 CPU ${"%.1f".format(datasetCpuAvg)}%（${"%.2f".format(coresUsed)}/$cpuCores 核）"
+            }
         } else {
             ""
         }
@@ -755,7 +857,7 @@ class MainViewModel(
         }
         beginInferenceMonitoring()
         val wallStart = SystemClock.elapsedRealtime()
-        val cpuStart = Process.getElapsedCpuTime()
+        val cpuMark = cpuMonitor.mark()
         var produced = 0
         try {
             val fullPrompt = buildPrompt(text)
@@ -800,15 +902,15 @@ class MainViewModel(
             endInferenceMonitoring()
             if (isTestRunning) {
                 val wall = SystemClock.elapsedRealtime() - wallStart
-                val cpu = (Process.getElapsedCpuTime() - cpuStart).coerceAtLeast(0L)
                 if (produced > 0 && wall > 0L) {
                     testActiveTimeMs += wall
-                    datasetCpuMs += cpu
-                    datasetWallMs += wall
-                    val average = processCpuPercent(datasetCpuMs, datasetWallMs, cpuCores)
-                    if (average != null) {
-                        datasetCpuAvg = average
-                        cpuUsage = average
+                    val delta = cpuMonitor.deltaSince(cpuMark)
+                    if (delta != null) {
+                        addMeterDelta(delta)
+                        val average = shownCpuAverage() ?: meterPercent()
+                        if (average != null) {
+                            datasetCpuAvg = average
+                        }
                     }
                     publishTestSpeed(SystemClock.elapsedRealtime())
                 }

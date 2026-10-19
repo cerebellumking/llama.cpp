@@ -4,7 +4,9 @@ import android.app.DownloadManager
 import android.content.Context
 import android.content.SharedPreferences
 import android.llama.cpp.LLamaAndroid
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -18,6 +20,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -31,10 +34,12 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.collectAsState
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.net.toUri
+import com.example.llama.CpuMeterMode
 import com.example.llama.Downloadable
 import com.example.llama.MainViewModel
 import com.example.llama.cancelDownloadsFor
@@ -245,6 +250,33 @@ fun EvalSettingsSheet(
                 Text("保存地址")
             }
             HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+            Text("CPU 统计", style = MaterialTheme.typography.titleMedium)
+            Text(
+                text = cpuMeterHint(viewModel.cpuMeterMode, viewModel.cpuSourceLabel),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            CpuMeterMode.entries.forEach { mode ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable {
+                            preferences.edit().putString("cpu_meter_mode", mode.stored()).apply()
+                            viewModel.updateCpuMeterMode(mode)
+                        },
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    RadioButton(
+                        selected = viewModel.cpuMeterMode == mode,
+                        onClick = {
+                            preferences.edit().putString("cpu_meter_mode", mode.stored()).apply()
+                            viewModel.updateCpuMeterMode(mode)
+                        },
+                    )
+                    Text(cpuMeterTitle(mode))
+                }
+            }
+            HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
             Text("检验单识别", style = MaterialTheme.typography.titleMedium)
             Spacer(Modifier.height(4.dp))
             Text(
@@ -365,6 +397,23 @@ private fun ModelRow(
         onClick = { onLoadOrDownload(model) },
         enabled = downloadingModel == null || downloadingModel == model,
     )
+}
+
+private fun cpuMeterTitle(mode: CpuMeterMode): String = when (mode) {
+    CpuMeterMode.FREQUENCY -> "频率"
+    CpuMeterMode.AUTO -> "自动"
+    CpuMeterMode.SYSTEM -> "整机"
+    CpuMeterMode.PROCESS -> "本进程"
+}
+
+private fun cpuMeterHint(mode: CpuMeterMode, resolved: String): String {
+    val choice = when (mode) {
+        CpuMeterMode.FREQUENCY -> "默认。按各核当前频率相对最低、最高频率的比例估算，也就是 CPU Stats 的算法。"
+        CpuMeterMode.AUTO -> "先读 /proc/stat。小米 14 能读到整机时间；读不到再用频率。"
+        CpuMeterMode.SYSTEM -> "优先读 /proc/stat。读不到时用各核当前频率相对最低、最高频率的比例。"
+        CpuMeterMode.PROCESS -> "本进程按 CPU 时间 / 墙钟 / 核心数计算，不读 /proc/stat。"
+    }
+    return if (resolved.isBlank()) choice else "$choice 当前用的是$resolved。"
 }
 
 private fun clearDownloadPrefs(preferences: SharedPreferences) {
