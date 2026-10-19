@@ -9,6 +9,7 @@ import com.example.llama.InferenceMode
 @Immutable
 data class EvalMetrics(
     val inferenceSpeed: Double = 0.0,
+    val requestTpotMs: Double = -1.0,
     val isInferenceRunning: Boolean = false,
     val cpuUsage: Float = 0.0f,
     val cpuEnabled: Boolean = false,

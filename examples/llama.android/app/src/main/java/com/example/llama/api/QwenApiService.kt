@@ -21,7 +21,7 @@ class QwenApiService : ApiService {
 
     private val client = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
-        .readTimeout(30, TimeUnit.SECONDS)
+        .readTimeout(180, TimeUnit.SECONDS)
         .writeTimeout(30, TimeUnit.SECONDS)
         .build()
 
@@ -36,25 +36,70 @@ class QwenApiService : ApiService {
         }
 
         private const val API_URL = ""
+
+        // Qwen3.8-27B-FP8 model card, thinking mode (the default).
+        // https://huggingface.co/Qwen/Qwen3.8-27B-FP8
+        const val QWEN38_TEMPERATURE = 1.0
+        const val QWEN38_TOP_P = 0.95
+        const val QWEN38_TOP_K = 20
+        const val QWEN38_MIN_P = 0.0
+        const val QWEN38_PRESENCE_PENALTY = 0.0
+        const val QWEN38_REPETITION_PENALTY = 1.0
+        const val QWEN38_MAX_NEW_TOKENS = 4096
+    }
+
+    @Volatile
+    private var endpoint: String = API_URL
+
+    @Volatile
+    private var qwen38Sampling: Boolean = false
+
+    fun configure(wsUrl: String, qwen38: Boolean) {
+        endpoint = if (qwen38) generateUrlFromWs(wsUrl) else API_URL
+        qwen38Sampling = qwen38
+    }
+
+    private fun generateUrlFromWs(wsUrl: String): String {
+        val uri = android.net.Uri.parse(wsUrl.trim())
+        val scheme = if (uri.scheme.equals("wss", ignoreCase = true)) "https" else "http"
+        val host = uri.host ?: return ""
+        val port = uri.port
+        val authority = if (port != -1) "$host:$port" else host
+        return "$scheme://$authority/generate"
     }
 
     @OptIn(ExperimentalCoroutinesApi::class)
     override fun send(prompt: String): Flow<Pair<String, Int>> = callbackFlow {
+        if (endpoint.isEmpty()) {
+            close(IOException("Qwen API 地址为空"))
+            awaitClose { }
+            return@callbackFlow
+        }
+
         val jsonBody = JSONObject().apply {
             put("prompt", prompt)
-            put("max_length", 256)  // 可以根据需要调整
             put("stream", true)
+            if (qwen38Sampling) {
+                put("max_new_tokens", QWEN38_MAX_NEW_TOKENS)
+                put("temperature", QWEN38_TEMPERATURE)
+                put("top_p", QWEN38_TOP_P)
+                put("top_k", QWEN38_TOP_K)
+                put("min_p", QWEN38_MIN_P)
+                put("presence_penalty", QWEN38_PRESENCE_PENALTY)
+                put("repetition_penalty", QWEN38_REPETITION_PENALTY)
+            } else {
+                put("max_length", 256)
+            }
         }
 
         val requestBody = jsonBody.toString().toRequestBody("application/json".toMediaType())
 
         val request = Request.Builder()
-            .url(API_URL)
+            .url(endpoint)
             .addHeader("Content-Type", "application/json")
             .post(requestBody)
             .build()
 
-        var isFirstToken = true
         val call = client.newCall(request)
 
         call.enqueue(object : okhttp3.Callback {
@@ -92,13 +137,7 @@ class QwenApiService : ApiService {
                                             if (parts.size >= 2) {
                                                 val text = parts[0]
                                                 val tokenCount = parts[1].trim().toInt()
-
-                                                if (isFirstToken) {
-                                                    trySend(Pair(text, 0))
-                                                    isFirstToken = false
-                                                } else {
-                                                    trySend(Pair(text, tokenCount))
-                                                }
+                                                trySend(Pair(text, tokenCount))
                                             }
                                         }
                                     }
@@ -109,7 +148,7 @@ class QwenApiService : ApiService {
                         }
 
                         reader.close()
-                        trySend(Pair("\nQwen API completed", 1))
+                        trySend(Pair("\nQwen API completed", 0))
                         close()
                     } catch (e: Exception) {
                         Log.e(tag, "Error processing response: $e")

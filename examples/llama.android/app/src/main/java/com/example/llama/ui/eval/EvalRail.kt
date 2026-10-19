@@ -39,6 +39,14 @@ private fun speedText(speed: Double): String {
     return String.format(Locale.US, "%.2f", speed) + " tokens/s"
 }
 
+private fun generationSpeedText(tpotMs: Double): String {
+    return if (tpotMs <= 0.0) {
+        "生成速度 --"
+    } else {
+        String.format(Locale.US, "生成速度 %.2f tokens/s", 1000.0 / tpotMs)
+    }
+}
+
 @Composable
 fun MetricsBar(
     metrics: EvalMetrics,
@@ -87,18 +95,13 @@ fun MetricsBar(
                 } else {
                     Icon(
                         imageVector = Icons.Default.Speed,
-                        contentDescription = "解读速度",
+                        contentDescription = "生成速度",
                         tint = BluePrimary,
                         modifier = Modifier.size(16.dp),
                     )
                     Spacer(Modifier.width(6.dp))
-                    val liveSpeed = if (metrics.inferenceSpeed > 0 || metrics.isInferenceRunning) {
-                        speedText(metrics.inferenceSpeed)
-                    } else {
-                        "-- tokens/s"
-                    }
                     Text(
-                        text = liveSpeed,
+                        text = generationSpeedText(metrics.requestTpotMs),
                         color = BluePrimary,
                         fontSize = 13.sp,
                         fontWeight = FontWeight.Medium,

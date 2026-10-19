@@ -43,6 +43,44 @@ int main() {
     expect(heterospec_hotpath::overlap_kv_trim_pos(10, 0) == 11, "zero accept keeps last token only");
     expect(heterospec_hotpath::overlap_kv_trim_pos(10, 2) == 13, "partial accept drops rejected tail");
     expect(heterospec_hotpath::overlap_first_extra_pos(10, 3) == 13, "last sent draft is first extra");
+
+    // Commit position: [previous last] + accepted drafts, starting at the old prompt length.
+    // Phone stall log: prompt=32, accepted=1 -> two tokens at positions 32 and 33.
+    {
+        const int prompt_len = 32;
+        expect(heterospec_hotpath::commit_pos0(prompt_len) == 32, "accept 0 pos0");
+        expect(heterospec_hotpath::commit_token_count(0) == 1, "accept 0 commits previous last only");
+        expect(!heterospec_hotpath::keep_draft_branch(false), "accept 0 drops the draft branch");
+    }
+    {
+        const int accepted = 1;
+        expect(heterospec_hotpath::commit_pos0(32) == 32, "partial accept pos0");
+        expect(heterospec_hotpath::commit_token_count(accepted) == 2, "partial accept commits last plus one draft");
+        expect(!heterospec_hotpath::keep_draft_branch(
+                heterospec_hotpath::overlap_hit(accepted, 3, 198, 271, 2)),
+                "partial accept drops the draft branch");
+    }
+    {
+        const int accepted = 3;
+        expect(heterospec_hotpath::commit_pos0(32) == 32, "full accept pos0");
+        expect(heterospec_hotpath::commit_token_count(accepted) == 4, "full accept commits last plus every draft");
+        expect(!heterospec_hotpath::keep_draft_branch(
+                heterospec_hotpath::overlap_hit(accepted, 3, 8, 9, 2)),
+                "full accept with wrong bonus drops the draft branch");
+    }
+    {
+        const int accepted = 3;
+        const bool hit = heterospec_hotpath::overlap_hit(accepted, 3, 9, 9, 2);
+        expect(hit, "hit accepts every sent draft and the guessed bonus");
+        expect(heterospec_hotpath::commit_pos0(32) == 32, "hit pos0");
+        expect(heterospec_hotpath::commit_token_count(accepted) == 4, "hit still commits the accepted prefix");
+        expect(heterospec_hotpath::keep_draft_branch(hit), "hit keeps the draft branch");
+    }
+    expect(heterospec_hotpath::commit_token_count(-1) == 1, "negative accept clamps");
+    expect(heterospec_hotpath::commit_pos0(-4) == 0, "negative prompt clamps");
+    expect(heterospec_hotpath::prefetch_leaves_kv_hole(true, 3, 3), "full prefetch accept leaves the last draft out of KV");
+    expect(!heterospec_hotpath::prefetch_leaves_kv_hole(true, 2, 3), "partial prefetch accept is already in KV");
+    expect(!heterospec_hotpath::prefetch_leaves_kv_hole(false, 3, 3), "overlap writes the last sent draft");
     // Last-year ACK: n_past starts at pos_base-1, then n_past += accepted+1,
     // then seq_rm(n_past+1, -1). That start index is overlap_kv_trim_pos.
     for (int pos_base = 1; pos_base <= 12; ++pos_base) {

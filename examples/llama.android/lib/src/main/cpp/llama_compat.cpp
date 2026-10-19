@@ -222,15 +222,23 @@ Java_android_llama_cpp_LLamaAndroid_new_1context(JNIEnv *env, jobject, jlong jmo
     ctx_params.n_outputs_max   = 8;
     ctx_params.embeddings      = false;
     ctx_params.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_AUTO;
+    // Hybrid recurrent state cannot be cropped in the middle (n_rs_seq == 0).
+    // Seq 0 keeps the confirmed prefix; seq 1 is the draft / overlap branch.
+    if (hybrid) {
+        ctx_params.n_seq_max = 2;
+        ctx_params.kv_unified = true;
+    }
 
-    LOGi("new_context desc=%s hybrid=%d n_vocab=%d n_ctx=%u n_batch=%u n_ubatch=%u n_outputs_max=%u fa=auto",
+    LOGi("new_context desc=%s hybrid=%d n_vocab=%d n_ctx=%u n_batch=%u n_ubatch=%u n_outputs_max=%u n_seq_max=%u kv_unified=%d fa=auto",
             desc,
             hybrid ? 1 : 0,
             n_vocab,
             ctx_params.n_ctx,
             ctx_params.n_batch,
             ctx_params.n_ubatch,
-            ctx_params.n_outputs_max);
+            ctx_params.n_outputs_max,
+            ctx_params.n_seq_max,
+            ctx_params.kv_unified ? 1 : 0);
 
     auto try_init = [&](llama_context_params params) -> llama_context * {
         try {
@@ -245,6 +253,12 @@ Java_android_llama_cpp_LLamaAndroid_new_1context(JNIEnv *env, jobject, jlong jmo
     if (!context) {
         LOGe("new_context auto flash-attn failed, retry disabled");
         ctx_params.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_DISABLED;
+        context = try_init(ctx_params);
+    }
+    if (!context && hybrid && ctx_params.n_seq_max > 1) {
+        LOGe("hetero_phone seq_branch_unavailable retry n_seq_max=1");
+        ctx_params.n_seq_max = 1;
+        ctx_params.kv_unified = false;
         context = try_init(ctx_params);
     }
 
@@ -635,6 +649,9 @@ struct CloudState {
     llama_tokens prefetch_drafts;
     std::vector<float> prefetch_confidences;
     std::vector<float> prefetch_calibrated;
+    // Hybrid/recurrent models keep the confirmed prefix on seq 0 and draft on seq 1.
+    bool branch_kv = false;
+    bool branch_ready = false;
 };
 
 static uint32_t cloud_next_request_id(CloudState& state) {
@@ -891,6 +908,17 @@ static std::string icn_multi_build_icn_name_v2(
             + std::to_string(speculative_len);
 }
 
+static std::string join_token_ids(const llama_tokens& tokens) {
+    std::ostringstream out;
+    for (size_t i = 0; i < tokens.size(); ++i) {
+        if (i > 0) {
+            out << ',';
+        }
+        out << static_cast<int32_t>(tokens[i]);
+    }
+    return out.str();
+}
+
 static std::string icn_multi_join_floats(const std::vector<float>& values) {
     std::ostringstream out;
     out << std::fixed << std::setprecision(3);
@@ -974,6 +1002,10 @@ static llama_batch& ensure_draft_batch(CloudState& state) {
     return state.draft_batch;
 }
 
+static llama_seq_id draft_seq(const CloudState& state) {
+    return state.branch_kv ? static_cast<llama_seq_id>(1) : static_cast<llama_seq_id>(0);
+}
+
 static AdaptiveDraftResult generate_icn_multi_local_draft(
         CloudState& state,
         llama_context * context,
@@ -1001,9 +1033,11 @@ static AdaptiveDraftResult generate_icn_multi_local_draft(
     const llama_pos n_past = static_cast<llama_pos>(prompt_tgt.size());
 
     common_batch_clear(batch);
-    common_batch_add(batch, id_last, n_past, { 0 }, true);
+    common_batch_add(batch, id_last, n_past, { draft_seq(state) }, true);
     if (llama_decode(context, batch) != 0) {
-        LOGe("ICN-Multi-HeteroSpec draft decode failed while syncing last token");
+        LOGe("hetero_phone draft_sync_fail last=%d n_past=%d",
+                static_cast<int>(id_last),
+                static_cast<int>(n_past));
         return result;
     }
 
@@ -1056,9 +1090,9 @@ static AdaptiveDraftResult generate_icn_multi_local_draft(
         }
 
         common_batch_clear(batch);
-        common_batch_add(batch, id, n_past + i + 1, { 0 }, true);
+        common_batch_add(batch, id, n_past + i + 1, { draft_seq(state) }, true);
         if (llama_decode(context, batch) != 0) {
-            LOGe("ICN-Multi-HeteroSpec draft decode failed after token position=%d", i);
+            LOGe("hetero_phone draft_decode_fail position=%d", i);
             break;
         }
     }
@@ -1097,7 +1131,7 @@ static void overlap_while_waiting(
             batch,
             sent_drafts.back(),
             pos_base + static_cast<llama_pos>(sent_drafts.size()),
-            { 0 },
+            { draft_seq(state) },
             true);
     if (llama_decode(context, batch) != 0) {
         return;
@@ -1124,7 +1158,7 @@ static void overlap_while_waiting(
                     batch,
                     id,
                     pos_base + static_cast<llama_pos>(sent_drafts.size()) + 1,
-                    { 0 },
+                    { draft_seq(state) },
                     true);
             if (llama_decode(context, batch) != 0) {
                 prefetch.has_guessed_bonus = false;
@@ -1144,7 +1178,7 @@ static void overlap_while_waiting(
                 id,
                 pos_base + static_cast<llama_pos>(sent_drafts.size()) + 1
                         + static_cast<llama_pos>(prefetch.drafts.size()),
-                { 0 },
+                { draft_seq(state) },
                 true);
         if (llama_decode(context, batch) != 0) {
             prefetch.drafts.pop_back();
@@ -1153,6 +1187,71 @@ static void overlap_while_waiting(
             break;
         }
     }
+}
+
+// Write [previous last token] + accepted drafts into seq 0. The bonus is the
+// next round's last token and stays out of this prefix. Logits are requested
+// only for the last committed token, same as prefill.
+static bool commit_to_seq0(
+        llama_context * context,
+        CloudState& state,
+        llama_token previous_last,
+        const llama_tokens& drafts,
+        int accepted,
+        int pos0) {
+    const int n_accepted = std::max(0, std::min(accepted, static_cast<int>(drafts.size())));
+    const int n_commit = heterospec_hotpath::commit_token_count(n_accepted);
+    if (n_commit > state.max_n_draft + 1) {
+        LOGe("hetero_phone commit_fail pos0=%d n=%d cap=%d",
+                pos0,
+                n_commit,
+                state.max_n_draft + 1);
+        return false;
+    }
+    llama_batch& batch = ensure_draft_batch(state);
+    common_batch_clear(batch);
+    common_batch_add(batch, previous_last, pos0, { 0 }, n_commit == 1);
+    for (int i = 0; i < n_accepted; ++i) {
+        common_batch_add(
+                batch,
+                drafts[static_cast<size_t>(i)],
+                pos0 + 1 + i,
+                { 0 },
+                i + 1 == n_accepted);
+    }
+    if (llama_decode(context, batch) != 0) {
+        LOGe("hetero_phone commit_fail pos0=%d n=%d", pos0, n_commit);
+        return false;
+    }
+    LOGi("hetero_phone commit pos0=%d n=%d", pos0, n_commit);
+    return true;
+}
+
+static bool prefill_prefix(llama_context * context, const llama_tokens& tokens) {
+    if (tokens.empty()) {
+        return false;
+    }
+    const int n_batch = std::max(1, static_cast<int>(llama_n_batch(context)));
+    llama_batch batch = llama_batch_init(n_batch, 0, 1);
+    bool ok = true;
+    for (size_t start = 0; start < tokens.size() && ok; ) {
+        common_batch_clear(batch);
+        const size_t end = std::min(tokens.size(), start + static_cast<size_t>(n_batch));
+        for (size_t i = start; i < end; ++i) {
+            common_batch_add(
+                    batch,
+                    tokens[i],
+                    static_cast<llama_pos>(i),
+                    { 0 },
+                    i + 1 == tokens.size());
+        }
+        if (llama_decode(context, batch) != 0) {
+            ok = false;
+        }
+        start = end;
+    }
+    llama_batch_free(batch);
+    return ok;
 }
 
 static void update_adaptive_n_draft(
@@ -1553,6 +1652,16 @@ Java_android_llama_cpp_LLamaAndroid_heterospec_1init(
     state->n_past = prompt_tgt.size() - 1;
     state->prompt_tokens = prompt_tgt;
     state->last_token = tokens_list.back();
+    {
+        const llama_model * model = llama_get_model(context);
+        const bool hybrid = model != nullptr
+                && (llama_model_is_hybrid(model) || llama_model_is_recurrent(model));
+        state->branch_kv = hybrid && llama_n_seq_max(context) >= 2;
+        state->branch_ready = false;
+        LOGi("hetero_phone branch_kv=%d n_seq_max=%u",
+                state->branch_kv ? 1 : 0,
+                llama_n_seq_max(context));
+    }
 
     // 发送prefill请求
     try {
@@ -1641,7 +1750,10 @@ Java_android_llama_cpp_LLamaAndroid_heterospec_1loop(
     }
 
     if (!state || !state->is_connected) {
-        return env->NewStringUTF("");
+        LOGe("hetero_phone loop_skip state=%d connected=%d",
+                state != nullptr ? 1 : 0,
+                state != nullptr && state->is_connected ? 1 : 0);
+        return nullptr;
     }
 
     // 1. 本地生成推测token (使用llama.cpp的API)
@@ -1652,6 +1764,11 @@ Java_android_llama_cpp_LLamaAndroid_heterospec_1loop(
     // 使用保存的状态
     const auto& prompt_tgt = state->prompt_tokens;
     const auto id_last = state->last_token;
+    LOGi("hetero_phone loop_enter n_past=%d prompt=%zu last=%d prefetch=%d",
+            state->n_past,
+            prompt_tgt.size(),
+            static_cast<int>(id_last),
+            state->has_prefetch ? 1 : 0);
 
     // 生成草稿token
     auto start1 = std::chrono::high_resolution_clock::now();
@@ -1684,6 +1801,16 @@ Java_android_llama_cpp_LLamaAndroid_heterospec_1loop(
         state->prefetch_confidences.clear();
         state->prefetch_calibrated.clear();
     } else {
+        if (state->branch_kv) {
+            llama_memory_t mem = llama_get_memory(context);
+            if (!llama_memory_seq_rm(mem, 1, -1, -1)) {
+                LOGe("hetero_phone branch_rm_fail");
+                return env->NewStringUTF("");
+            }
+            llama_memory_seq_cp(mem, 0, 1, -1, -1);
+            state->branch_ready = true;
+            LOGi("hetero_phone branch_open n_past=%d", state->n_past);
+        }
         draft_result = generate_icn_multi_local_draft(
                 *state,
                 context,
@@ -1701,9 +1828,14 @@ Java_android_llama_cpp_LLamaAndroid_heterospec_1loop(
     std::vector<float> calibrated_confidences = std::move(draft_result.calibrated_confidences);
     state->adaptive_n_draft = clamp_adaptive_n_draft(*state, static_cast<int>(draft_tokens.size()));
     if (draft_tokens.empty()) {
-        LOGe("ICN-Multi-HeteroSpec draft produced no tokens");
+        LOGe("hetero_phone draft_empty last=%d n_past=%d",
+                static_cast<int>(id_last),
+                state->n_past);
         return env->NewStringUTF("");
     }
+    LOGi("hetero_phone draft_ready count=%zu ids=%s",
+            draft_tokens.size(),
+            join_token_ids(draft_tokens).c_str());
     auto end1 = std::chrono::high_resolution_clock::now();
     double draft_time = std::chrono::duration<double>(end1 - start1).count();
     state->draft_times.push_back(draft_time);
@@ -1722,6 +1854,9 @@ Java_android_llama_cpp_LLamaAndroid_heterospec_1loop(
             binary_msg.data(),
             binary_msg.size(),
             websocketpp::frame::opcode::binary);
+        LOGi("hetero_phone verify_sent request_id=%u drafts=%s",
+                request_id,
+                join_token_ids(draft_tokens).c_str());
 
         const std::string icn_multi_icn_name = icn_multi_build_icn_name_v2(
                 *state, prompt_tgt, draft_tokens, static_cast<int>(draft_tokens.size()));
@@ -1757,20 +1892,23 @@ Java_android_llama_cpp_LLamaAndroid_heterospec_1loop(
         }
 
         std::unique_lock<std::mutex> lock(state->mutex);
-        const bool ready = state->cv.wait_for(lock, std::chrono::seconds(10), [state] {
+        // The next cloud forward folds the bonus token into the 27B cache before
+        // it logs. A cold FP8 M-tile autotunes for about a minute; 10s drops the
+        // socket and the UI stays on the token already shown.
+        const bool ready = state->cv.wait_for(lock, std::chrono::seconds(120), [state] {
             return state->has_verify_response || state->has_error || !state->is_connected;
         });
         if (!ready) {
-            LOGe("Verify v3 timeout request_id=%u", request_id);
+            LOGe("hetero_phone verify_timeout request_id=%u", request_id);
             state->pending_request_id = 0;
             state->is_connected = false;
             lock.unlock();
             state->client.stop_perpetual();
             state->client.stop();
-            return env->NewStringUTF("");
+            return nullptr;
         }
         if (state->has_error) {
-            LOGe("Verify v3 error request_id=%u code=%u message=%s",
+            LOGe("hetero_phone verify_error request_id=%u code=%u message=%s",
                     state->error_request_id,
                     state->error_code,
                     state->error_message.c_str());
@@ -1792,18 +1930,21 @@ Java_android_llama_cpp_LLamaAndroid_heterospec_1loop(
             state->response_accepted_draft_count = 0;
             state->response_verify_us = 0;
             state->response_queue_us = 0;
-            LOGi("Verification roundtrip=%.3fs cloud_verify=%.3fs queue=%.3fs request_id=%u",
+            LOGi("hetero_phone verify_ok request_id=%u accepted=%d wait_s=%.3f tokens=%s",
+                    request_id,
+                    accepted_draft_count,
                     verify_time,
-                    cloud_verify_time,
-                    queue_time,
-                    request_id);
+                    join_token_ids(final_tokens).c_str());
         } else {
+            LOGe("hetero_phone verify_missing request_id=%u connected=%d",
+                    request_id,
+                    state->is_connected ? 1 : 0);
             state->pending_request_id = 0;
         }
         lock.unlock();
 
         if (final_tokens.empty()) {
-            LOGe("Verify v3 returned no tokens request_id=%u", request_id);
+            LOGe("hetero_phone verify_empty request_id=%u", request_id);
             return env->NewStringUTF("");
         }
 
@@ -1841,10 +1982,22 @@ Java_android_llama_cpp_LLamaAndroid_heterospec_1loop(
                     observed_network_time,
                     queue_time,
                     payload_bytes);
+            const llama_token commit_last = state->last_token;
+            const int commit_pos0 = heterospec_hotpath::commit_pos0(
+                    static_cast<int>(state->prompt_tokens.size()));
             state->prompt_tokens.insert(state->prompt_tokens.end(), state->last_token);
             state->last_token = final_tokens.back();
             state->prompt_tokens.insert(state->prompt_tokens.end(), final_tokens.begin(), final_tokens.end() - 1);
             state->n_past += final_tokens.size();
+            if (state->branch_kv && !commit_to_seq0(
+                    context,
+                    *state,
+                    commit_last,
+                    draft_tokens,
+                    accepted_draft_count,
+                    commit_pos0)) {
+                return env->NewStringUTF("");
+            }
 
             const int32_t bonus_token = static_cast<int32_t>(final_tokens.back());
             const int32_t guessed_bonus = prefetch.has_guessed_bonus
@@ -1856,33 +2009,69 @@ Java_android_llama_cpp_LLamaAndroid_heterospec_1loop(
                     bonus_token,
                     guessed_bonus,
                     static_cast<int>(prefetch.drafts.size()));
-            LOGi("hetero_overlap hit=%d used_prefetch=%d prefetch_k=%d guessed=%d bonus=%d",
+            LOGi("hetero_phone kv hit=%d n_past=%d accepted=%d bonus=%d trim=%d",
                     hit ? 1 : 0,
-                    used_prefetch ? 1 : 0,
-                    static_cast<int>(prefetch.drafts.size()),
-                    guessed_bonus,
-                    bonus_token);
+                    state->n_past,
+                    accepted_draft_count,
+                    bonus_token,
+                    (!hit && (prefetch.decoded_last_sent || prefetch.has_guessed_bonus)) ? 1 : 0);
             state->accepted_tokens.clear();
-            if (hit) {
+            if (hit && heterospec_hotpath::keep_draft_branch(hit)) {
                 state->has_prefetch = true;
                 state->prefetch_drafts = std::move(prefetch.drafts);
                 state->prefetch_confidences = std::move(prefetch.confidences);
                 state->prefetch_calibrated = std::move(prefetch.calibrated);
+                state->branch_ready = state->branch_kv;
             } else {
                 state->has_prefetch = false;
                 state->prefetch_drafts.clear();
                 state->prefetch_confidences.clear();
                 state->prefetch_calibrated.clear();
-                if (prefetch.decoded_last_sent || prefetch.has_guessed_bonus) {
-                    llama_memory_seq_rm(
-                            llama_get_memory(context),
-                            0,
-                            static_cast<llama_pos>(heterospec_hotpath::overlap_kv_trim_pos(
-                                    static_cast<int>(pos_base),
-                                    accepted_draft_count)),
-                            -1);
+                llama_memory_t mem = llama_get_memory(context);
+                if (state->branch_kv) {
+                    if (!llama_memory_seq_rm(mem, 1, -1, -1)) {
+                        LOGe("hetero_phone branch_rm_fail");
+                        return env->NewStringUTF("");
+                    }
+                    state->branch_ready = false;
+                    LOGi("hetero_phone branch_drop");
+                } else {
+                    bool removed = true;
+                    const bool prefetch_hole = heterospec_hotpath::prefetch_leaves_kv_hole(
+                            used_prefetch,
+                            accepted_draft_count,
+                            draft_count);
+                    if (prefetch_hole) {
+                        removed = false;
+                        LOGi("hetero_phone prefetch_hole accepted=%d", accepted_draft_count);
+                    } else {
+                        if (prefetch.decoded_last_sent || prefetch.has_guessed_bonus) {
+                            if (!llama_memory_seq_rm(
+                                    mem,
+                                    0,
+                                    static_cast<llama_pos>(heterospec_hotpath::overlap_kv_trim_pos(
+                                            static_cast<int>(pos_base),
+                                            accepted_draft_count)),
+                                    -1)) {
+                                removed = false;
+                            }
+                        }
+                        if (!llama_memory_seq_rm(mem, 0, state->n_past + 1, -1)) {
+                            removed = false;
+                        }
+                        if (!removed) {
+                            LOGe("hetero_phone seq_rm_fail n_past=%d", state->n_past);
+                        }
+                    }
+                    if (!removed) {
+                        llama_memory_clear(mem, true);
+                        if (!prefill_prefix(context, state->prompt_tokens)) {
+                            LOGe("hetero_phone reprefix_fail n=%zu", state->prompt_tokens.size());
+                            return env->NewStringUTF("");
+                        }
+                        LOGi("hetero_phone reprefix n=%zu", state->prompt_tokens.size());
+                    }
                 }
-                llama_memory_seq_rm(llama_get_memory(context), 0, state->n_past + 1, -1);
             }
 
             // 处理输出
@@ -1890,6 +2079,11 @@ Java_android_llama_cpp_LLamaAndroid_heterospec_1loop(
                 const auto n_cur = env->CallIntMethod(intvar_ncur, la_int_var_value);
 
                 if (llama_vocab_is_eog(vocab, token) || n_cur >= n_len) {
+                    LOGi("hetero_phone stop eog=%d n_cur=%d n_len=%d token=%d",
+                            llama_vocab_is_eog(vocab, token) ? 1 : 0,
+                            n_cur,
+                            n_len,
+                            static_cast<int>(token));
                     if (!state->draft_times.empty()) {
                         double total_draft_time = 0.0;
                         for (double time : state->draft_times) {
@@ -1900,12 +2094,13 @@ Java_android_llama_cpp_LLamaAndroid_heterospec_1loop(
                     }
 
                     if (is_valid_utf8(cached_token_chars.c_str())) {
-                        cached_token_chars += "[eog]"; // 添加字符串形式的nullptr作为终止标志
+                        cached_token_chars += "[eog]";
                         auto result = env->NewStringUTF(cached_token_chars.c_str());
-                        LOGi("Generated text: %s", cached_token_chars.c_str());
+                        LOGi("hetero_phone emit text=%s", cached_token_chars.c_str());
                         cached_token_chars.clear();
                         return result;
                     } else {
+                        LOGe("hetero_phone stop_incomplete bytes=%zu", cached_token_chars.size());
                         return nullptr;
                     }
                 }
@@ -1917,15 +2112,17 @@ Java_android_llama_cpp_LLamaAndroid_heterospec_1loop(
             // 返回生成的文本
             if (is_valid_utf8(cached_token_chars.c_str())) {
                 auto result = env->NewStringUTF(cached_token_chars.c_str());
-                LOGi("Generated text: %s", cached_token_chars.c_str());
+                LOGi("hetero_phone emit text=%s", cached_token_chars.c_str());
                 cached_token_chars.clear();
                 return result;
             } else {
+                LOGe("hetero_phone emit_incomplete bytes=%zu", cached_token_chars.size());
                 return env->NewStringUTF("");
             }
     } catch (const std::exception& e) {
-        LOGe("Exception in heterospec_loop: %s", e.what());
+        LOGe("hetero_phone exception %s", e.what());
     }
 
+    LOGe("hetero_phone return_empty");
     return env->NewStringUTF("");
 }

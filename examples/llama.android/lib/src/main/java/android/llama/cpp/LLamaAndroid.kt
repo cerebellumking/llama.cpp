@@ -193,9 +193,15 @@ class LLamaAndroid {
                     var curTokens = ncur.value
                     while (ncur.value <= promptLen + nlen) {
                         currentCoroutineContext().ensureActive()
+                        val before = ncur.value
                         val str = heterospec_loop(state.context, promptLen + nlen, ncur)
-                        if (str == null) {
-                            break
+                        currentCoroutineContext().ensureActive()
+                        Log.i(
+                            tag,
+                            "hetero_phone kotlin before=$before after=${ncur.value} text=${str?.take(120)}",
+                        )
+                        if (str == null || (str.isEmpty() && ncur.value == curTokens)) {
+                            throw IllegalStateException("协同解码中断：云端没有继续返回 token")
                         }
                         if (str.contains("[eog]")) {
                             val finalText = str.replace("[eog]", "")
@@ -267,7 +273,7 @@ class LLamaAndroid {
     }
 
     companion object {
-        const val DEFAULT_HETERO_SERVER_URL = "ws://122.51.47.91:22776/ws/predict/binary/v3"
+        const val DEFAULT_HETERO_SERVER_URL = "ws://124.222.246.189:25079/ws/predict/binary/v3"
         const val DEFAULT_HETERO_TARGET_MODEL = "qwen3-4b"
         const val DEFAULT_HETERO_TOKENIZER_ID = "qwen3-4b-tokenizer"
         const val DRAFT_STRATEGY_FIXED3 = "fixed3"

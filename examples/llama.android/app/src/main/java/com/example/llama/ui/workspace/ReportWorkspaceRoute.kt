@@ -181,6 +181,7 @@ private fun LiveMetricsBar(viewModel: MainViewModel) {
     MetricsBar(
         metrics = EvalMetrics(
             inferenceSpeed = viewModel.inferenceSpeed,
+            requestTpotMs = viewModel.requestTpotMs,
             isInferenceRunning = viewModel.isInferenceRunning,
             cpuUsage = viewModel.cpuUsage,
             cpuEnabled = viewModel.isCpuMonitorEnabled,

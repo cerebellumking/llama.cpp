@@ -8,7 +8,7 @@ interface ApiService {
         fun getInstance(type: ApiType): ApiService {
             return when (type) {
                 ApiType.DEEPSEEK -> DeepseekApiService.getInstance()
-                ApiType.QWEN -> QwenApiService.getInstance()
+                ApiType.QWEN, ApiType.QWEN38 -> QwenApiService.getInstance()
             }
         }
     }
@@ -18,5 +18,6 @@ interface ApiService {
 // HeteroSpec 不走 ApiService，只通过 LLamaAndroid.sendHetero。
 enum class ApiType {
     DEEPSEEK,
-    QWEN
+    QWEN,
+    QWEN38,
 }

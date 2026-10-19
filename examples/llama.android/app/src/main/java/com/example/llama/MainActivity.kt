@@ -236,6 +236,12 @@ fun defaultModels(extFilesDir: File?): List<Downloadable> = listOf(
         isApiModel = true,
     ),
     Downloadable(
+        name = "Qwen3.8-27B-FP8",
+        source = null,
+        destination = null,
+        isApiModel = true,
+    ),
+    Downloadable(
         name = "DeepSeek-R1-DRAFT-Qwen2.5-0.5B (Q4_K_M, 0.4 GiB)",
         source = Uri.parse("https://modelscope.cn/alamios/DeepSeek-R1-DRAFT-Qwen2.5-0.5B-GGUF/resolve/main/DeepSeek-R1-DRAFT-Qwen2.5-0.5B-Q4_K_M.gguf?download=true"),
         destination = File(extFilesDir, "DeepSeek-R1-DRAFT-Qwen2.5-0.5B-Q4_K_M.gguf"),

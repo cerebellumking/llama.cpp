@@ -175,4 +175,25 @@ inline int overlap_first_extra_pos(int pos_base, int sent_k) {
     return pos_base + std::max(0, sent_k);
 }
 
+// Confirmed prefix is prompt_tokens, which does not yet include last_token.
+// Commit writes [last_token, accepted drafts...) starting at that length.
+// The bonus stays out of the prefix; the next round decodes it there.
+inline int commit_pos0(int prompt_len) {
+    return std::max(0, prompt_len);
+}
+
+inline int commit_token_count(int accepted) {
+    return 1 + std::max(0, accepted);
+}
+
+inline bool keep_draft_branch(bool overlap_hit) {
+    return overlap_hit;
+}
+
+// A prefetch round does not run overlap, so the last prefetched draft is sampled
+// but not decoded. Accepting that draft leaves a one-token hole in the KV.
+inline bool prefetch_leaves_kv_hole(bool used_prefetch, int accepted, int sent_k) {
+    return used_prefetch && sent_k > 0 && accepted >= sent_k;
+}
+
 }  // namespace heterospec_hotpath

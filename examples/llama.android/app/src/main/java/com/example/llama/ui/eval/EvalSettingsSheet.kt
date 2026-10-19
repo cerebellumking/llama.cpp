@@ -277,8 +277,10 @@ fun EvalSettingsSheet(
                         viewModel.switchToApiMode(
                             when (model.name) {
                                 "DeepSeek API" -> ApiType.DEEPSEEK
+                                "Qwen3.8-27B-FP8" -> ApiType.QWEN38
                                 else -> ApiType.QWEN
-                            }
+                            },
+                            model.name,
                         )
                     },
                 )

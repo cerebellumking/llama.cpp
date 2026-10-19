@@ -10,6 +10,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.llama.api.ApiService
 import com.example.llama.api.ApiType
+import com.example.llama.api.QwenApiService
 import java.io.File
 import java.io.IOException
 import java.util.concurrent.TimeUnit
@@ -40,6 +41,9 @@ class MainViewModel(
     var inferenceSpeed by mutableStateOf(0.0)
         private set
 
+    var requestTpotMs by mutableStateOf(-1.0)
+        private set
+
     var cpuUsage by mutableStateOf(0.0f)
         private set
 
@@ -63,6 +67,8 @@ class MainViewModel(
 
     var currentApiType by mutableStateOf(ApiType.DEEPSEEK)
         private set
+
+    private var selectedApiName: String = "DeepSeek API"
 
     var heteroServerUrl by mutableStateOf(LLamaAndroid.DEFAULT_HETERO_SERVER_URL)
         private set
@@ -114,6 +120,8 @@ class MainViewModel(
     private var lastTokenTime = System.currentTimeMillis()
     private var tokenCount = 0
     private var isFirstToken = true
+    private var requestOutputTokens = 0
+    private var requestFirstTokenAtMs = 0L
     private val pendingStream = StringBuilder()
     private var lastStreamFlushAt = 0L
     private var lastDatasetSpeedUiAt = 0L
@@ -250,6 +258,9 @@ class MainViewModel(
         tokenCount = 0
         inferenceSpeed = 0.0
         isFirstToken = true
+        requestOutputTokens = 0
+        requestFirstTokenAtMs = 0L
+        requestTpotMs = -1.0
         pendingStream.setLength(0)
         lastStreamFlushAt = 0L
         stoppedByUser = false
@@ -335,7 +346,12 @@ class MainViewModel(
         PromptMode.QWEN3 ->
             "You are Qwen, created by Alibaba Cloud. You are a helpful assistant.\n\nUser: $text\n\nAssistant:\n<think></think>"
         PromptMode.QWEN35 ->
-            "<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.<|im_end|>\n<|im_start|>user\n$text<|im_end|>\n<|im_start|>assistant\n"
+            if (inferenceMode == InferenceMode.API && currentApiType == ApiType.QWEN38) {
+                // Qwen3.8 thinking mode is the model-card default: open <think> and do not close it.
+                "<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.<|im_end|>\n<|im_start|>user\n$text<|im_end|>\n<|im_start|>assistant\n<think>\n"
+            } else {
+                "<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.<|im_end|>\n<|im_start|>user\n$text<|im_end|>\n<|im_start|>assistant\n"
+            }
         PromptMode.MINICPM5 ->
             // Official MiniCPM5 jinja: BOS + ChatML, then empty think (enable_thinking=false).
             // GGUF has add_bos_token=false, so BOS must be in the prompt. Missing either
@@ -348,6 +364,17 @@ class MainViewModel(
         if (str.isNotEmpty()) pendingStream.append(str)
         if (tokens > 0) tokenCount += tokens
         val currentTime = System.currentTimeMillis()
+        if (requestFirstTokenAtMs == 0L && (str.isNotEmpty() || tokens > 0)) {
+            requestFirstTokenAtMs = currentTime
+        }
+        if (tokens > 0) {
+            requestOutputTokens += tokens
+            val produced = requestOutputTokens - 1
+            val elapsed = currentTime - requestFirstTokenAtMs
+            if (produced > 0 && elapsed > 0L) {
+                requestTpotMs = elapsed.toDouble() / produced
+            }
+        }
         val timeDiff = (currentTime - lastTokenTime) / 1000.0
 
         if (isFirstToken) {
@@ -386,10 +413,7 @@ class MainViewModel(
     fun isSelectedModel(model: Downloadable): Boolean {
         if (model.isApiModel) {
             if (inferenceMode != InferenceMode.API) return false
-            return when (model.name) {
-                "DeepSeek API" -> currentApiType == ApiType.DEEPSEEK
-                else -> currentApiType == ApiType.QWEN
-            }
+            return model.name == selectedApiName
         }
         if (!isModelLoaded) return false
         if (model.destination?.name != loadedModelName) return false
@@ -451,6 +475,9 @@ class MainViewModel(
         generateJob?.cancel()
         messages = listOf(ChatMessage.evalLog("已清除对话历史"))
         inferenceSpeed = 0.0
+        requestTpotMs = -1.0
+        requestOutputTokens = 0
+        requestFirstTokenAtMs = 0L
         errorBanner = null
         streamingAssistantId = null
     }
@@ -463,17 +490,30 @@ class MainViewModel(
         messages += ChatMessage.evalLog(text)
     }
 
-    fun switchToApiMode(type: ApiType) {
+    fun switchToApiMode(type: ApiType, name: String) {
         currentApiType = type
+        selectedApiName = name
         inferenceMode = InferenceMode.API
         connectionState = ConnectionState.Online
-        appendEval("已切换到 ${type.name} API 模式")
-        loadedModelName = type.name
+        if (type == ApiType.QWEN38) {
+            promptMode = PromptMode.QWEN35
+            QwenApiService.getInstance().configure(heteroServerUrl, qwen38 = true)
+            appendEval("已切换到 $name，思考模式 temperature=1.0 top_p=0.95 top_k=20")
+        } else if (type == ApiType.QWEN) {
+            QwenApiService.getInstance().configure(heteroServerUrl, qwen38 = false)
+            appendEval("已切换到 $name")
+        } else {
+            appendEval("已切换到 $name")
+        }
+        loadedModelName = name
     }
 
     fun updateHeteroServerUrl(url: String) {
         heteroServerUrl = url.trim().ifEmpty { LLamaAndroid.DEFAULT_HETERO_SERVER_URL }
         llamaAndroid.setHeteroServerUrl(heteroServerUrl)
+        if (currentApiType == ApiType.QWEN38) {
+            QwenApiService.getInstance().configure(heteroServerUrl, qwen38 = true)
+        }
         appendEval("HeteroSpec服务地址：$heteroServerUrl")
         if (inferenceMode == InferenceMode.HETERO) {
             viewModelScope.launch { pingHealthz() }
