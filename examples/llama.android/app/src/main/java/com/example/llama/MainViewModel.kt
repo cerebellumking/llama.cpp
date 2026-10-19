@@ -337,7 +337,10 @@ class MainViewModel(
         PromptMode.QWEN35 ->
             "<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.<|im_end|>\n<|im_start|>user\n$text<|im_end|>\n<|im_start|>assistant\n"
         PromptMode.MINICPM5 ->
-            "<|im_start|>user\n$text<|im_end|>\n<|im_start|>assistant\n"
+            // Official MiniCPM5 jinja: BOS + ChatML, then empty think (enable_thinking=false).
+            // GGUF has add_bos_token=false, so BOS must be in the prompt. Missing either
+            // BOS or the think block makes greedy decoding collapse to repeating `**`.
+            "<s><|im_start|>user\n$text<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
         PromptMode.DEEPSEEk -> text
     }
 

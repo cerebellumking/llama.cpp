@@ -2970,6 +2970,14 @@ void llama_vocab::impl::load(llama_model_loader & ml, const LLM_KV & kv) {
             }
         );
 
+        // Official convert_hf_to_gguf writes tokenizer.ggml.pre=minicpm5.
+        // Some public MiniCPM5 GGUFs were tagged llama-bpe, which selects the
+        // Llama3 pre-tokenizer instead of MiniCPM5's number-first regex.
+        if (_contains_any(model_name, {"minicpm5"}) && pre_type == LLAMA_VOCAB_PRE_TYPE_LLAMA3) {
+            LLAMA_LOG_WARN("%s: MiniCPM5 GGUF has tokenizer.ggml.pre=llama-bpe; using minicpm5 pre-tokenizer\n", __func__);
+            pre_type = LLAMA_VOCAB_PRE_TYPE_MINICPM5;
+        }
+
         // set attributes by model/tokenizer/architecture name
         if (false
                 || _contains_any(tokenizer_pre, {"jina-v2-de", "jina-v2-es", "jina-v2-code"})

@@ -64,7 +64,7 @@ class LLamaAndroid {
     private external fun backend_free()
     private external fun new_batch(nTokens: Int, embd: Int, nSeqMax: Int): Long
     private external fun free_batch(batch: Long)
-    private external fun new_sampler(): Long
+    private external fun new_sampler(minicpmChat: Boolean): Long
     private external fun free_sampler(sampler: Long)
 
     private external fun system_info(): String
@@ -121,7 +121,8 @@ class LLamaAndroid {
                     val batch = new_batch(1536, 0, 1)
                     if (batch == 0L) throw IllegalStateException("new_batch() failed")
 
-                    val sampler = new_sampler()
+                    val minicpmChat = pathToModel.contains("MiniCPM5", ignoreCase = true)
+                    val sampler = new_sampler(minicpmChat)
                     if (sampler == 0L) throw IllegalStateException("new_sampler() failed")
 
                     Log.i(tag, "Loaded model $pathToModel")

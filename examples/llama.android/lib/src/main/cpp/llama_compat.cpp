@@ -320,11 +320,20 @@ Java_android_llama_cpp_LLamaAndroid_free_1batch(JNIEnv *, jobject, jlong batch_p
 
 extern "C"
 JNIEXPORT jlong JNICALL
-Java_android_llama_cpp_LLamaAndroid_new_1sampler(JNIEnv *, jobject) {
+Java_android_llama_cpp_LLamaAndroid_new_1sampler(JNIEnv *, jobject, jboolean minicpm_chat) {
     auto sparams = llama_sampler_chain_default_params();
     sparams.no_perf = true;
     llama_sampler * smpl = llama_sampler_chain_init(sparams);
-    llama_sampler_chain_add(smpl, llama_sampler_init_greedy());
+    if (minicpm_chat == JNI_TRUE) {
+        // OpenBMB MiniCPM5-1B No-think: temp=0.7, top_p=0.95, min_p=0.
+        // Greedy (and llama.cpp's default min_p=0.05) can get stuck repeating `**`.
+        LOGi("MiniCPM5 sampler: top_p=0.95 temp=0.7 dist");
+        llama_sampler_chain_add(smpl, llama_sampler_init_top_p(0.95f, 1));
+        llama_sampler_chain_add(smpl, llama_sampler_init_temp(0.7f));
+        llama_sampler_chain_add(smpl, llama_sampler_init_dist(LLAMA_DEFAULT_SEED));
+    } else {
+        llama_sampler_chain_add(smpl, llama_sampler_init_greedy());
+    }
 
     return reinterpret_cast<jlong>(smpl);
 }
