@@ -9,16 +9,24 @@ import com.example.llama.ocr.DualOcrController
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.util.Locale
+import kotlin.coroutines.coroutineContext
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 
+/**
+ * @return false when the user stopped the run. The caller must not start the next pass.
+ */
 suspend fun runDatasetTest(
     context: Context,
     viewModel: MainViewModel,
     datasetName: String,
     ocr: DualOcrController,
     strategyLabel: String? = null,
-) {
+): Boolean {
     val base = "datasets/$datasetName"
     val entries = try {
         context.assets.list(base)
@@ -34,25 +42,40 @@ suspend fun runDatasetTest(
             imageExts.any { lower.endsWith(it) }
         }.sorted()
 
+        if (imageFiles.isEmpty()) {
+            viewModel.log("数据集里没有图片：$datasetName")
+            return true
+        }
         viewModel.startTest(imageFiles.size, strategyLabel)
         for (file in imageFiles) {
+            coroutineContext.ensureActive()
+            if (!viewModel.isTestRunning) return false
             try {
-                context.assets.open("$base/$file").use { input ->
-                    val bitmap = BitmapFactory.decodeStream(input)
-                    if (bitmap != null) {
-                        val text = runOcrSuspend(ocr, bitmap)
-                        viewModel.sendForTest_impl(text)
-                    } else {
-                        viewModel.sendForTest_impl("")
+                val bitmap = withContext(Dispatchers.Default) {
+                    context.assets.open("$base/$file").use { input ->
+                        BitmapFactory.decodeStream(input)
                     }
                 }
+                if (bitmap != null) {
+                    val text = try {
+                        runOcrSuspend(ocr, bitmap)
+                    } finally {
+                        if (!bitmap.isRecycled) bitmap.recycle()
+                    }
+                    viewModel.sendForTest_impl(text)
+                } else {
+                    viewModel.skipTestItem()
+                }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 viewModel.log("读取图片失败：${e.message}")
-                viewModel.sendForTest_impl("")
+                viewModel.skipTestItem()
             }
         }
+        if (!viewModel.isTestRunning) return false
         viewModel.finishTest(strategyLabel)
-        return
+        return true
     }
 
     val candidates = listOf("$base.json", "$base.csv", "$base.txt")
@@ -68,7 +91,7 @@ suspend fun runDatasetTest(
 
     if (openedName == null) {
         viewModel.log("未识别的数据集：$datasetName")
-        return
+        return true
     }
 
     val prompts: List<String> = when {
@@ -77,11 +100,19 @@ suspend fun runDatasetTest(
         else -> readPromptsFromTxt(context, openedName)
     }
 
+    if (prompts.isEmpty()) {
+        viewModel.log("数据集是空的：$datasetName")
+        return true
+    }
     viewModel.startTest(prompts.size, strategyLabel)
     for (p in prompts) {
+        coroutineContext.ensureActive()
+        if (!viewModel.isTestRunning) return false
         viewModel.sendForTest_impl(p)
     }
+    if (!viewModel.isTestRunning) return false
     viewModel.finishTest(strategyLabel)
+    return true
 }
 
 private fun readPromptsFromTxt(context: Context, assetPath: String): List<String> =
@@ -141,6 +172,8 @@ private fun readPromptsFromJson(context: Context, assetPath: String): List<Strin
 private suspend fun runOcrSuspend(ocr: DualOcrController, bitmap: Bitmap): String =
     try {
         cleanOcrText(ocr.recognize(bitmap))
+    } catch (e: CancellationException) {
+        throw e
     } catch (_: Exception) {
         ""
     }

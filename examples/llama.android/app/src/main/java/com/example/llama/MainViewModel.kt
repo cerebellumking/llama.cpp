@@ -2,6 +2,8 @@ package com.example.llama
 
 import android.graphics.Bitmap
 import android.llama.cpp.LLamaAndroid
+import android.os.Process
+import android.os.SystemClock
 import android.util.Log
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -10,6 +12,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.llama.api.ApiService
 import com.example.llama.api.ApiType
+import com.example.llama.api.DeepseekApiService
 import com.example.llama.api.QwenApiService
 import java.io.File
 import java.io.IOException
@@ -25,6 +28,8 @@ import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
+
+private const val TEST_API_MAX_NEW_TOKENS = 256
 
 class MainViewModel(
     private val llamaAndroid: LLamaAndroid = LLamaAndroid.instance()
@@ -44,21 +49,24 @@ class MainViewModel(
     var requestTpotMs by mutableStateOf(-1.0)
         private set
 
-    var cpuUsage by mutableStateOf(0.0f)
+    var cpuUsage by mutableStateOf(-1.0f)
         private set
 
     var isCpuMonitorEnabled by mutableStateOf(false)
         private set
 
+    var hasProcessCpuSample by mutableStateOf(false)
+        private set
+
     var isInferenceRunning by mutableStateOf(false)
         private set
-    private var cpuSampleSum = 0.0f
-    private var cpuSampleCount = 0
 
-    private var datasetCpuSampleSum = 0.0f
-    private var datasetCpuSampleCount = 0
-    var datasetCpuAvg by mutableStateOf(0.0f)
+    private var datasetCpuMs = 0L
+    private var datasetWallMs = 0L
+    var datasetCpuAvg by mutableStateOf(-1.0f)
         private set
+    private val cpuCores = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
+    private var testOwnsMonitor = false
 
     var inferenceMode by mutableStateOf(InferenceMode.LOCAL)
         private set
@@ -145,8 +153,11 @@ class MainViewModel(
     private var testStartTimeMs: Long = 0L
     private var testTotalTokens: Int = 0
     private var testActiveTimeMs: Long = 0L
+    private var testSkipped = 0
+    private var testFailed = 0
 
     private var generateJob: Job? = null
+    private var testJob: Job? = null
     private var streamingAssistantId: String? = null
     private var stoppedByUser = false
     private var generationSeq = 0
@@ -180,6 +191,7 @@ class MainViewModel(
     override fun onCleared() {
         super.onCleared()
         cpuMonitor.stopMonitoring()
+        testJob?.cancel()
         generateJob?.cancel()
         viewModelScope.launch {
             try {
@@ -194,40 +206,37 @@ class MainViewModel(
         if (enabled == isCpuMonitorEnabled) return
         isCpuMonitorEnabled = enabled
         if (enabled) {
-            cpuMonitor.startMonitoring(500) { usage ->
-                if (!isTestRunning && !isInferenceRunning) return@startMonitoring
-                if (isTestRunning) {
-                    datasetCpuSampleSum += usage
-                    datasetCpuSampleCount += 1
-                    val avg = if (datasetCpuSampleCount > 0) {
-                        datasetCpuSampleSum / datasetCpuSampleCount
-                    } else {
-                        0.0f
-                    }
-                    if (kotlin.math.abs(cpuUsage - avg) >= 0.3f) {
-                        datasetCpuAvg = avg
-                        cpuUsage = avg
-                    }
-                } else {
-                    cpuSampleSum += usage
-                    cpuSampleCount += 1
-                    val avg = if (cpuSampleCount > 0) cpuSampleSum / cpuSampleCount else 0.0f
-                    if (kotlin.math.abs(cpuUsage - avg) >= 0.3f) {
-                        cpuUsage = avg
-                    }
-                }
-            }
-        } else {
+            testOwnsMonitor = false
+            startProcessCpuMonitor()
+        } else if (!isTestRunning) {
             cpuMonitor.stopMonitoring()
-            cpuUsage = 0.0f
+            if (!hasProcessCpuSample) cpuUsage = -1.0f
+        } else {
+            testOwnsMonitor = true
+        }
+    }
+
+    private fun startProcessCpuMonitor() {
+        cpuMonitor.startMonitoring(500) { usage ->
+            if (isTestRunning) {
+                if (isInferenceRunning && kotlin.math.abs(cpuUsage - usage) >= 0.1f) {
+                    cpuUsage = usage
+                }
+                return@startMonitoring
+            }
+            if (!isInferenceRunning) return@startMonitoring
+            if (kotlin.math.abs(cpuUsage - usage) >= 0.1f || cpuUsage < 0f) {
+                cpuUsage = usage
+            }
         }
     }
 
     private fun beginInferenceMonitoring() {
         isInferenceRunning = true
-        cpuSampleSum = 0.0f
-        cpuSampleCount = 0
-        cpuUsage = 0.0f
+        if (!isTestRunning) {
+            hasProcessCpuSample = false
+            cpuUsage = -1.0f
+        }
     }
 
     private fun endInferenceMonitoring() {
@@ -307,11 +316,18 @@ class MainViewModel(
     }
 
     fun stopGeneration() {
-        if (generateJob == null && !isInferenceRunning) return
+        val stoppingTest = isTestRunning
+        if (generateJob == null && !isInferenceRunning && !stoppingTest && testJob?.isActive != true) return
         stoppedByUser = true
         generationSeq++
         generateJob?.cancel()
         generateJob = null
+        if (stoppingTest) {
+            isTestRunning = false
+            publishTestStatus("测试已停止：$testProcessed/$testTotal")
+        }
+        testJob?.cancel()
+        testJob = null
         flushStreamingText()
         markStopped()
         endInferenceMonitoring()
@@ -501,7 +517,7 @@ class MainViewModel(
             appendEval("已切换到 $name，思考模式 temperature=1.0 top_p=0.95 top_k=20")
         } else if (type == ApiType.QWEN) {
             QwenApiService.getInstance().configure(heteroServerUrl, qwen38 = false)
-            appendEval("已切换到 $name")
+            appendEval("已切换到 $name，请求发到 HeteroSpec /generate，贪心解码。云端权重是服务器当前加载的模型")
         } else {
             appendEval("已切换到 $name")
         }
@@ -511,8 +527,11 @@ class MainViewModel(
     fun updateHeteroServerUrl(url: String) {
         heteroServerUrl = url.trim().ifEmpty { LLamaAndroid.DEFAULT_HETERO_SERVER_URL }
         llamaAndroid.setHeteroServerUrl(heteroServerUrl)
-        if (currentApiType == ApiType.QWEN38) {
-            QwenApiService.getInstance().configure(heteroServerUrl, qwen38 = true)
+        if (currentApiType == ApiType.QWEN || currentApiType == ApiType.QWEN38) {
+            QwenApiService.getInstance().configure(
+                heteroServerUrl,
+                qwen38 = currentApiType == ApiType.QWEN38,
+            )
         }
         appendEval("HeteroSpec服务地址：$heteroServerUrl")
         if (inferenceMode == InferenceMode.HETERO) {
@@ -596,6 +615,55 @@ class MainViewModel(
         }
     }
 
+    fun prepareDatasetTest(): String? {
+        if (isTestRunning || testJob?.isActive == true) {
+            val reason = "上一次测试还没结束"
+            reportTestProblem(reason)
+            return reason
+        }
+        val reason = testBlockReason() ?: return null
+        reportTestProblem(reason)
+        return reason
+    }
+
+    fun attachTestJob(job: Job) {
+        testJob = job
+    }
+
+    fun onTestCancelled() {
+        if (!isTestRunning) return
+        isTestRunning = false
+        endInferenceMonitoring()
+        if (testOwnsMonitor && !isCpuMonitorEnabled) {
+            testOwnsMonitor = false
+            cpuMonitor.stopMonitoring()
+        }
+        publishTestStatus("测试已停止：$testProcessed/$testTotal")
+    }
+
+    fun testBlockReason(): String? = when (inferenceMode) {
+        InferenceMode.LOCAL, InferenceMode.HETERO ->
+            if (isModelLoaded) {
+                null
+            } else {
+                "请先在设置里加载模型，再开始测试"
+            }
+        InferenceMode.API -> when (currentApiType) {
+            ApiType.DEEPSEEK ->
+                if (DeepseekApiService.getInstance().isReady()) {
+                    null
+                } else {
+                    "DeepSeek API 还没有可用的密钥，这条在线服务现在发不出请求"
+                }
+            ApiType.QWEN, ApiType.QWEN38 ->
+                if (QwenApiService.getInstance().hasEndpoint()) {
+                    null
+                } else {
+                    "在线服务地址是空的，请先在设置里保存 HeteroSpec 地址"
+                }
+        }
+    }
+
     fun startTest(totalItems: Int, strategyLabel: String? = null) {
         isTestRunning = true
         testTotal = totalItems
@@ -603,15 +671,33 @@ class MainViewModel(
         datasetSpeed = 0.0
         lastTestSpeed = 0.0
         testTotalTokens = 0
-        testStartTimeMs = System.currentTimeMillis()
+        testStartTimeMs = SystemClock.elapsedRealtime()
         testActiveTimeMs = 0L
         lastDatasetSpeedUiAt = 0L
-        datasetCpuSampleSum = 0.0f
-        datasetCpuSampleCount = 0
-        datasetCpuAvg = 0.0f
-        cpuUsage = 0.0f
+        testSkipped = 0
+        testFailed = 0
+        datasetCpuMs = 0L
+        datasetWallMs = 0L
+        datasetCpuAvg = -1.0f
+        hasProcessCpuSample = false
+        cpuUsage = -1.0f
+        if (!isCpuMonitorEnabled) {
+            testOwnsMonitor = true
+            startProcessCpuMonitor()
+        }
+        val model = loadedModelName ?: "未命名"
         val extra = if (strategyLabel.isNullOrEmpty()) "" else "，策略=$strategyLabel"
-        appendEval("开始数据集测试，共 $totalItems 条$extra")
+        val text = "开始测试：$model，$inferenceMode，共 $totalItems 条$extra"
+        publishTestStatus(text)
+        if (inferenceMode == InferenceMode.API) {
+            appendEval("在线测试每条最多 $TEST_API_MAX_NEW_TOKENS 个新 token")
+        }
+    }
+
+    fun skipTestItem() {
+        if (!isTestRunning) return
+        testSkipped += 1
+        testProcessed += 1
     }
 
     private fun updateTestTokens(tokens: Int) {
@@ -620,29 +706,42 @@ class MainViewModel(
         testTotalTokens += tokens
     }
 
-    fun incrementTestProgress() {
-        if (!isTestRunning) return
-        testProcessed += 1
-    }
-
     fun finishTest(strategyLabel: String? = null) {
         if (!isTestRunning) return
         val activeSeconds = testActiveTimeMs / 1000.0
         lastTestSpeed = if (activeSeconds > 0) testTotalTokens / activeSeconds else 0.0
         datasetSpeed = lastTestSpeed
         isTestRunning = false
+        if (datasetWallMs > 0L) {
+            datasetCpuAvg = processCpuPercent(datasetCpuMs, datasetWallMs, cpuCores) ?: -1.0f
+            cpuUsage = datasetCpuAvg
+            hasProcessCpuSample = datasetCpuAvg >= 0f
+        }
+        if (testOwnsMonitor && !isCpuMonitorEnabled) {
+            testOwnsMonitor = false
+            cpuMonitor.stopMonitoring()
+        }
         val extra = if (strategyLabel.isNullOrEmpty()) "" else "，策略=$strategyLabel"
-        appendEval(
-            "测试完成：$testProcessed/$testTotal$extra，整体速度：${"%.2f".format(lastTestSpeed)} tokens/s"
+        val skipped = if (testSkipped > 0) "，跳过 $testSkipped 条空识别" else ""
+        val failed = if (testFailed > 0) "，失败 $testFailed 条" else ""
+        val cpuText = if (datasetWallMs > 0L && datasetCpuAvg >= 0f) {
+            val coresUsed = datasetCpuMs.toDouble() / datasetWallMs.toDouble()
+            "，进程 CPU ${"%.1f".format(datasetCpuAvg)}%（${"%.2f".format(coresUsed)}/$cpuCores 核）"
+        } else {
+            ""
+        }
+        publishTestStatus(
+            "测试完成：$testProcessed/$testTotal$extra$skipped$failed，" +
+                "整体速度 ${"%.2f".format(lastTestSpeed)} tokens/s（含等待）$cpuText"
         )
     }
 
-    private fun accumulateItemActiveDuration(itemFirstTokenTimeMs: Long?, itemLastTokenTimeMs: Long?) {
-        if (itemFirstTokenTimeMs != null && itemLastTokenTimeMs != null && itemLastTokenTimeMs >= itemFirstTokenTimeMs) {
-            testActiveTimeMs += (itemLastTokenTimeMs - itemFirstTokenTimeMs)
-        }
+    private fun publishTestSpeed(nowMs: Long) {
         val activeSeconds = testActiveTimeMs / 1000.0
-        datasetSpeed = if (activeSeconds > 0) testTotalTokens / activeSeconds else 0.0
+        if (activeSeconds <= 0.0) return
+        if (nowMs - lastDatasetSpeedUiAt < 200L) return
+        lastDatasetSpeedUiAt = nowMs
+        datasetSpeed = testTotalTokens / activeSeconds
     }
 
     suspend fun sendForTest(text: String) {
@@ -650,47 +749,82 @@ class MainViewModel(
     }
 
     suspend fun sendForTest_impl(text: String) {
+        if (text.isBlank()) {
+            skipTestItem()
+            return
+        }
         beginInferenceMonitoring()
-        var itemFirstTokenTimeMs: Long? = null
-        var itemLastTokenTimeMs: Long? = null
+        val wallStart = SystemClock.elapsedRealtime()
+        val cpuStart = Process.getElapsedCpuTime()
+        var produced = 0
         try {
             val fullPrompt = buildPrompt(text)
             val flow = when (inferenceMode) {
-                InferenceMode.LOCAL -> llamaAndroid.send(fullPrompt, formatChat = usesSpecialChatTokens(promptMode))
-                InferenceMode.API -> apiService.send(fullPrompt)
+                InferenceMode.LOCAL -> llamaAndroid.send(
+                    fullPrompt,
+                    formatChat = usesSpecialChatTokens(promptMode),
+                )
+                InferenceMode.API -> when (val api = apiService) {
+                    is QwenApiService -> api.send(fullPrompt, TEST_API_MAX_NEW_TOKENS)
+                    else -> api.send(fullPrompt)
+                }
                 InferenceMode.HETERO -> llamaAndroid.sendHetero(
                     fullPrompt,
                     formatChat = usesSpecialChatTokens(promptMode),
                     serverUrl = heteroServerUrl,
                 )
             }
-            flow.catch { Log.e(tag, "sendForTest() failed", it) }
-                .collect { (_, tokens) ->
-                    val now = System.currentTimeMillis()
-                    if (tokens > 0) {
-                        if (itemFirstTokenTimeMs == null) itemFirstTokenTimeMs = now
-                        itemLastTokenTimeMs = now
-                    }
+            flow.collect { (_, tokens) ->
+                if (!isTestRunning) return@collect
+                if (tokens > 0) {
+                    produced += tokens
                     updateTestTokens(tokens)
-                    val partialActive = if (itemFirstTokenTimeMs != null && itemLastTokenTimeMs != null) {
-                        itemLastTokenTimeMs!! - itemFirstTokenTimeMs!!
-                    } else {
-                        0L
-                    }
-                    val totalActive = testActiveTimeMs + partialActive
-                    if (totalActive > 0L && now - lastDatasetSpeedUiAt >= 200L) {
-                        lastDatasetSpeedUiAt = now
-                        datasetSpeed = testTotalTokens / (totalActive / 1000.0)
-                    }
                 }
+                val partialWall = SystemClock.elapsedRealtime() - wallStart
+                val countedWall = testActiveTimeMs + if (produced > 0) partialWall else 0L
+                if (countedWall > 0L) {
+                    val now = SystemClock.elapsedRealtime()
+                    val previous = testActiveTimeMs
+                    testActiveTimeMs = countedWall
+                    publishTestSpeed(now)
+                    testActiveTimeMs = previous
+                }
+            }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             Log.e(tag, "Error during sendForTest", e)
-            appendEval("测试失败：${e.message}")
+            testFailed += 1
+            appendEval("这一条失败：${e.message}")
         } finally {
-            accumulateItemActiveDuration(itemFirstTokenTimeMs, itemLastTokenTimeMs)
-            incrementTestProgress()
             endInferenceMonitoring()
+            if (isTestRunning) {
+                val wall = SystemClock.elapsedRealtime() - wallStart
+                val cpu = (Process.getElapsedCpuTime() - cpuStart).coerceAtLeast(0L)
+                if (produced > 0 && wall > 0L) {
+                    testActiveTimeMs += wall
+                    datasetCpuMs += cpu
+                    datasetWallMs += wall
+                    val average = processCpuPercent(datasetCpuMs, datasetWallMs, cpuCores)
+                    if (average != null) {
+                        datasetCpuAvg = average
+                        cpuUsage = average
+                    }
+                    publishTestSpeed(SystemClock.elapsedRealtime())
+                }
+                testProcessed += 1
+            }
         }
+    }
+
+    private fun publishTestStatus(text: String) {
+        messages += ChatMessage.status(text)
+        appendEval(text)
+    }
+
+    private fun reportTestProblem(text: String) {
+        errorBanner = text
+        publishTestStatus(text)
     }
 
     private suspend fun pingHealthz() {

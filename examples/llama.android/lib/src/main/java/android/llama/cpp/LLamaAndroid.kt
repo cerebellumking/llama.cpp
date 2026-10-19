@@ -228,13 +228,18 @@ class LLamaAndroid {
     fun send(message: String, formatChat: Boolean = false): Flow<Pair<String, Int>> = flow {
         when (val state = threadLocalState.get()) {
             is State.Loaded -> {
-                val ncur = IntVar(completion_init(state.context, state.batch, message, formatChat, nlen))
+                val promptLen = completion_init(state.context, state.batch, message, formatChat, nlen)
+                if (promptLen < 0) {
+                    throw IllegalStateException("本地解码失败")
+                }
+                val ncur = IntVar(promptLen)
+                val endPos = promptLen + nlen
                 var totalTokens = 0
                 var curTokens = ncur.value
                 try {
-                    while (ncur.value <= nlen) {
+                    while (ncur.value < endPos) {
                         currentCoroutineContext().ensureActive()
-                        val str = completion_loop(state.context, state.batch, state.sampler, nlen, ncur)
+                        val str = completion_loop(state.context, state.batch, state.sampler, endPos, ncur)
                         if (str == null) {
                             break
                         }

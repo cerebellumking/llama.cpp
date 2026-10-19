@@ -47,6 +47,13 @@ private fun generationSpeedText(tpotMs: Double): String {
     }
 }
 
+private fun cpuText(metrics: EvalMetrics): String {
+    val show = metrics.cpuEnabled || metrics.testRunning || metrics.cpuMeasured
+    if (!show) return "CPU 关"
+    if (metrics.cpuUsage < 0f) return "CPU --"
+    return String.format(Locale.US, "CPU %.1f%%", metrics.cpuUsage)
+}
+
 @Composable
 fun MetricsBar(
     metrics: EvalMetrics,
@@ -118,12 +125,12 @@ fun MetricsBar(
             )
             Spacer(Modifier.width(4.dp))
             Text(
-                text = if (metrics.cpuEnabled) {
-                    String.format(Locale.US, "%.0f%%", metrics.cpuUsage)
+                text = cpuText(metrics),
+                color = if (metrics.cpuEnabled || metrics.testRunning || metrics.cpuMeasured) {
+                    BluePrimary
                 } else {
-                    "CPU 关"
+                    BluePrimary.copy(alpha = 0.8f)
                 },
-                color = if (metrics.cpuEnabled) BluePrimary else BluePrimary.copy(alpha = 0.8f),
                 fontSize = 13.sp,
                 fontWeight = FontWeight.Medium,
                 maxLines = 1,

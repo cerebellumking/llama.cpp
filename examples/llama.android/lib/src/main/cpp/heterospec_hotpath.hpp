@@ -196,4 +196,21 @@ inline bool prefetch_leaves_kv_hole(bool used_prefetch, int accepted, int sent_k
     return used_prefetch && sent_k > 0 && accepted >= sent_k;
 }
 
+// Room left for n_predict new tokens. llama_decode aborts when one call
+// contains more tokens than n_batch, so a long report must be split.
+inline int prompt_token_budget(int n_ctx, int n_predict) {
+    const int ctx = std::max(1, n_ctx);
+    const int predict = std::max(1, n_predict);
+    if (predict >= ctx) {
+        return 1;
+    }
+    return ctx - predict;
+}
+
+inline int prefill_chunk_size(int n_batch, int batch_cap) {
+    const int batch = std::max(1, n_batch);
+    const int cap = std::max(1, batch_cap);
+    return std::min(batch, cap);
+}
+
 }  // namespace heterospec_hotpath

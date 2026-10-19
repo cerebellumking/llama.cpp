@@ -78,6 +78,10 @@ int main() {
     }
     expect(heterospec_hotpath::commit_token_count(-1) == 1, "negative accept clamps");
     expect(heterospec_hotpath::commit_pos0(-4) == 0, "negative prompt clamps");
+    expect(heterospec_hotpath::prompt_token_budget(3072, 512) == 2560, "leave 512 tokens to generate");
+    expect(heterospec_hotpath::prompt_token_budget(512, 512) == 1, "predict filling the context keeps one prompt token");
+    expect(heterospec_hotpath::prefill_chunk_size(512, 1536) == 512, "hybrid prefill chunk is n_batch");
+    expect(heterospec_hotpath::prefill_chunk_size(4096, 1536) == 1536, "prefill chunk stays inside the allocated batch");
     expect(heterospec_hotpath::prefetch_leaves_kv_hole(true, 3, 3), "full prefetch accept leaves the last draft out of KV");
     expect(!heterospec_hotpath::prefetch_leaves_kv_hole(true, 2, 3), "partial prefetch accept is already in KV");
     expect(!heterospec_hotpath::prefetch_leaves_kv_hole(false, 3, 3), "overlap writes the last sent draft");

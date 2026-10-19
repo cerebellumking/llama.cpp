@@ -385,6 +385,66 @@ Java_android_llama_cpp_LLamaAndroid_system_1info(JNIEnv *env, jobject) {
     return env->NewStringUTF(llama_print_system_info());
 }
 
+// LLamaAndroid.load allocates this batch with new_batch(1536, 0, 1).
+static constexpr int kPhoneBatchCap = 1536;
+
+static llama_tokens fit_prompt_tokens(llama_tokens tokens, int n_ctx, int n_predict) {
+    const int budget = heterospec_hotpath::prompt_token_budget(n_ctx, n_predict);
+    if (static_cast<int>(tokens.size()) <= budget) {
+        return tokens;
+    }
+    const int head = std::min(48, std::max(1, budget / 2));
+    const int tail = std::max(0, budget - head);
+    llama_tokens fitted;
+    fitted.reserve(static_cast<size_t>(budget));
+    fitted.insert(fitted.end(), tokens.begin(), tokens.begin() + head);
+    if (tail > 0) {
+        fitted.insert(fitted.end(), tokens.end() - tail, tokens.end());
+    }
+    LOGe("prompt_fit keep %d of %zu (head %d tail %d)",
+            budget,
+            tokens.size(),
+            head,
+            tail);
+    return fitted;
+}
+
+// One llama_decode call must stay within n_batch. A longer call hits
+// GGML_ASSERT and aborts the process. Logits are requested only for the
+// last prompt token, same as the old single-batch prefill.
+static int decode_prompt_chunks(
+        llama_context * context,
+        llama_batch * batch,
+        const llama_tokens& tokens) {
+    if (context == nullptr || batch == nullptr || tokens.empty()) {
+        return -1;
+    }
+    const int chunk = heterospec_hotpath::prefill_chunk_size(
+            static_cast<int>(llama_n_batch(context)),
+            kPhoneBatchCap);
+    for (size_t start = 0; start < tokens.size(); ) {
+        common_batch_clear(*batch);
+        const size_t end = std::min(tokens.size(), start + static_cast<size_t>(chunk));
+        for (size_t i = start; i < end; ++i) {
+            common_batch_add(
+                    *batch,
+                    tokens[i],
+                    static_cast<llama_pos>(i),
+                    { 0 },
+                    i + 1 == tokens.size());
+        }
+        if (llama_decode(context, *batch) != 0) {
+            LOGe("llama_decode() failed prompt chunk %zu..%zu of %zu",
+                    start,
+                    end,
+                    tokens.size());
+            return -1;
+        }
+        start = end;
+    }
+    return static_cast<int>(tokens.size());
+}
+
 extern "C"
 JNIEXPORT jint JNICALL
 Java_android_llama_cpp_LLamaAndroid_completion_1init(
@@ -404,38 +464,23 @@ Java_android_llama_cpp_LLamaAndroid_completion_1init(
     const auto batch = reinterpret_cast<llama_batch *>(batch_pointer);
 
     bool parse_special = (format_chat == JNI_TRUE);
-    const auto tokens_list = common_tokenize(context, text, true, parse_special);
-
-    auto n_ctx = llama_n_ctx(context);
-    auto n_kv_req = tokens_list.size() + n_len;
-
-    LOGi("n_len = %d, n_ctx = %d, n_kv_req = %zu", n_len, n_ctx, n_kv_req);
-
-    if (n_kv_req > n_ctx) {
-        LOGe("error: n_kv_req > n_ctx, the required KV cache size is not big enough");
-    }
-
-    for (auto id : tokens_list) {
-        LOGi("token: `%s`-> %d ", common_token_to_piece(context, id).c_str(), id);
-    }
-
-    common_batch_clear(*batch);
-
-    // evaluate the initial prompt
-    for (auto i = 0; i < tokens_list.size(); i++) {
-        common_batch_add(*batch, tokens_list[i], i, { 0 }, false);
-    }
-
-    // llama_decode will output logits only for the last token of the prompt
-    batch->logits[batch->n_tokens - 1] = true;
-
-    if (llama_decode(context, *batch) != 0) {
-        LOGe("llama_decode() failed");
-    }
-
+    auto tokens_list = common_tokenize(context, text, true, parse_special);
     env->ReleaseStringUTFChars(jtext, text);
 
-    return batch->n_tokens;
+    if (context == nullptr || batch == nullptr || tokens_list.empty()) {
+        LOGe("completion_init empty prompt");
+        return -1;
+    }
+
+    const int n_ctx = static_cast<int>(llama_n_ctx(context));
+    tokens_list = fit_prompt_tokens(std::move(tokens_list), n_ctx, n_len);
+    const int n_prompt = decode_prompt_chunks(context, batch, tokens_list);
+    LOGi("completion_init tokens=%d n_ctx=%d n_batch=%u n_len=%d",
+            n_prompt,
+            n_ctx,
+            llama_n_batch(context),
+            n_len);
+    return n_prompt;
 }
 
 extern "C"
@@ -463,7 +508,7 @@ Java_android_llama_cpp_LLamaAndroid_completion_1loop(
     const auto new_token_id = llama_sampler_sample(sampler, context, -1);
 
     const auto n_cur = env->CallIntMethod(intvar_ncur, la_int_var_value);
-    if (llama_vocab_is_eog(vocab, new_token_id) || n_cur == n_len) {
+    if (llama_vocab_is_eog(vocab, new_token_id) || n_cur >= n_len) {
         return nullptr;
     }
 
@@ -1605,7 +1650,11 @@ Java_android_llama_cpp_LLamaAndroid_heterospec_1init(
     const auto batch = reinterpret_cast<llama_batch *>(batch_pointer);
 
     bool parse_special = (format_chat == JNI_TRUE);
-    const auto tokens_list = common_tokenize(context, text, true, parse_special);
+    auto tokens_list = common_tokenize(context, text, true, parse_special);
+    tokens_list = fit_prompt_tokens(
+            std::move(tokens_list),
+            static_cast<int>(llama_n_ctx(context)),
+            n_len);
     if (tokens_list.size() < 2) {
         LOGe("heterospec_init requires at least two prompt tokens");
         env->ReleaseStringUTFChars(jtext, text);
@@ -1689,19 +1738,14 @@ Java_android_llama_cpp_LLamaAndroid_heterospec_1init(
         return -2;
     }
 
-    //  prefill draft model
-    common_batch_clear(*batch);
-
-    // evaluate the initial prompt
-    for (auto i = 0; i < prompt_tgt.size(); i++) {
-        common_batch_add(*batch, prompt_tgt[i], i, { 0 }, false);
-    }
-
-    // llama_decode will output logits only for the last token of the prompt
-    batch->logits[batch->n_tokens - 1] = true;
-
-    if (llama_decode(context, *batch) != 0) {
-        LOGe("llama_decode() failed");
+    // Prefill the draft in n_batch-sized chunks. One call larger than n_batch
+    // aborts inside llama_decode.
+    if (decode_prompt_chunks(context, batch, prompt_tgt) < 0) {
+        LOGe("hetero_phone prefill_fail tokens=%zu", prompt_tgt.size());
+        shutdown_cloud_state(*state);
+        env->ReleaseStringUTFChars(server_url, url);
+        env->ReleaseStringUTFChars(jtext, text);
+        return -2;
     }
 
     {
@@ -1730,7 +1774,7 @@ Java_android_llama_cpp_LLamaAndroid_heterospec_1init(
     env->ReleaseStringUTFChars(server_url, url);
     env->ReleaseStringUTFChars(jtext, text);
 
-    return batch->n_tokens;
+    return static_cast<jint>(prompt_tgt.size());
 }
 
 // 核心函数2: 协同解码循环

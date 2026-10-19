@@ -35,8 +35,6 @@ class QwenApiService : ApiService {
             return instance!!
         }
 
-        private const val API_URL = ""
-
         // Qwen3.8-27B-FP8 model card, thinking mode (the default).
         // https://huggingface.co/Qwen/Qwen3.8-27B-FP8
         const val QWEN38_TEMPERATURE = 1.0
@@ -49,15 +47,17 @@ class QwenApiService : ApiService {
     }
 
     @Volatile
-    private var endpoint: String = API_URL
+    private var endpoint: String = ""
 
     @Volatile
     private var qwen38Sampling: Boolean = false
 
     fun configure(wsUrl: String, qwen38: Boolean) {
-        endpoint = if (qwen38) generateUrlFromWs(wsUrl) else API_URL
         qwen38Sampling = qwen38
+        endpoint = generateUrlFromWs(wsUrl)
     }
+
+    fun hasEndpoint(): Boolean = endpoint.isNotBlank()
 
     private fun generateUrlFromWs(wsUrl: String): String {
         val uri = android.net.Uri.parse(wsUrl.trim())
@@ -68,8 +68,10 @@ class QwenApiService : ApiService {
         return "$scheme://$authority/generate"
     }
 
+    override fun send(prompt: String): Flow<Pair<String, Int>> = send(prompt, maxNewTokens = null)
+
     @OptIn(ExperimentalCoroutinesApi::class)
-    override fun send(prompt: String): Flow<Pair<String, Int>> = callbackFlow {
+    fun send(prompt: String, maxNewTokens: Int?): Flow<Pair<String, Int>> = callbackFlow {
         if (endpoint.isEmpty()) {
             close(IOException("Qwen API 地址为空"))
             awaitClose { }
@@ -79,16 +81,16 @@ class QwenApiService : ApiService {
         val jsonBody = JSONObject().apply {
             put("prompt", prompt)
             put("stream", true)
+            val limit = maxNewTokens ?: if (qwen38Sampling) QWEN38_MAX_NEW_TOKENS else 256
+            put("max_new_tokens", limit)
+            put("max_length", limit)
             if (qwen38Sampling) {
-                put("max_new_tokens", QWEN38_MAX_NEW_TOKENS)
                 put("temperature", QWEN38_TEMPERATURE)
                 put("top_p", QWEN38_TOP_P)
                 put("top_k", QWEN38_TOP_K)
                 put("min_p", QWEN38_MIN_P)
                 put("presence_penalty", QWEN38_PRESENCE_PENALTY)
                 put("repetition_penalty", QWEN38_REPETITION_PENALTY)
-            } else {
-                put("max_length", 256)
             }
         }
 

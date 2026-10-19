@@ -43,6 +43,11 @@ class DeepseekApiService : ApiService {
         private const val API_KEY = "your-api-key-here"  // 这里填入写死的API key
     }
 
+    fun isReady(): Boolean {
+        val key = API_KEY
+        return key.isNotBlank() && !key.startsWith("your-api-key")
+    }
+
     @OptIn(ExperimentalCoroutinesApi::class)
     override fun send(prompt: String): Flow<Pair<String, Int>> = callbackFlow {
         val jsonBody = JSONObject().apply {

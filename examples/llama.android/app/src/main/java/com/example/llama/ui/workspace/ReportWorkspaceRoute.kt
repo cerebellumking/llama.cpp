@@ -2,7 +2,6 @@ package com.example.llama.ui.workspace
 
 import android.app.DownloadManager
 import android.content.Context
-import android.llama.cpp.LLamaAndroid
 import android.os.SystemClock
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -23,13 +22,14 @@ import com.example.llama.Downloadable
 import com.example.llama.MainViewModel
 import com.example.llama.MessageKind
 import com.example.llama.ocr.DualOcrController
-import com.example.llama.ui.eval.DRAFT_STRATEGY_BOTH
+import com.example.llama.ui.eval.datasetTestPasses
 import com.example.llama.ui.eval.EvalRail
 import com.example.llama.ui.eval.EvalSettingsSheet
 import com.example.llama.ui.eval.MetricsBar
 import com.example.llama.ui.eval.TestDatasetDialog
 import com.example.llama.ui.eval.runDatasetTest
 import com.example.llama.ui.ocr.OcrReviewSheet
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 
 @Composable
@@ -130,28 +130,33 @@ fun ReportWorkspaceRoute(
 
     if (showTestDialog) {
         TestDatasetDialog(
+            inferenceMode = viewModel.inferenceMode,
+            modelLabel = viewModel.loadedModelName ?: "未加载模型",
             onDismiss = { showTestDialog = false },
             onSelectDataset = { datasetName, strategy ->
                 showTestDialog = false
-                scope.launch {
-                    val strategies = if (strategy == DRAFT_STRATEGY_BOTH) {
-                        listOf(
-                            LLamaAndroid.DRAFT_STRATEGY_FIXED3,
-                            LLamaAndroid.DRAFT_STRATEGY_ADAPTIVE,
-                        )
-                    } else {
-                        listOf(LLamaAndroid.normalizeDraftStrategy(strategy))
+                if (viewModel.prepareDatasetTest() == null) {
+                    val appContext = context.applicationContext
+                    val job = scope.launch {
+                        try {
+                            val passes = datasetTestPasses(viewModel.inferenceMode, strategy)
+                            for (pass in passes) {
+                                if (pass != null) viewModel.updateHeteroDraftStrategy(pass)
+                                val completed = runDatasetTest(
+                                    appContext,
+                                    viewModel,
+                                    datasetName,
+                                    ocr,
+                                    strategyLabel = pass,
+                                )
+                                if (!completed) break
+                            }
+                        } catch (e: CancellationException) {
+                            viewModel.onTestCancelled()
+                            throw e
+                        }
                     }
-                    for (s in strategies) {
-                        viewModel.updateHeteroDraftStrategy(s)
-                        runDatasetTest(
-                            context,
-                            viewModel,
-                            datasetName,
-                            ocr,
-                            strategyLabel = s,
-                        )
-                    }
+                    viewModel.attachTestJob(job)
                 }
             },
         )
@@ -185,6 +190,7 @@ private fun LiveMetricsBar(viewModel: MainViewModel) {
             isInferenceRunning = viewModel.isInferenceRunning,
             cpuUsage = viewModel.cpuUsage,
             cpuEnabled = viewModel.isCpuMonitorEnabled,
+            cpuMeasured = viewModel.hasProcessCpuSample,
             datasetSpeed = viewModel.datasetSpeed,
             lastTestSpeed = viewModel.lastTestSpeed,
             testRunning = viewModel.isTestRunning,
@@ -243,7 +249,7 @@ private fun LiveComposerBar(viewModel: MainViewModel, events: WorkspaceEvents) {
     ComposerBar(
         input = viewModel.message,
         onInputChange = events.onInputChange,
-        isInferenceRunning = viewModel.isInferenceRunning,
+        isInferenceRunning = viewModel.isInferenceRunning || viewModel.isTestRunning,
         sendEnabled = viewModel.canSend && (viewModel.message.isNotBlank() || hasReport),
         placeholder = if (viewModel.canSend) "补充说明（可选）" else "请先到设置里选择模型",
         onSend = events.onSend,
